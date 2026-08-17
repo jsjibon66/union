@@ -10,8 +10,8 @@ from telegram.ext import (
     filters,
 )
 
-BOT_TOKEN = os.getenv("8963314797:AAEgLA-lSn11tt6ea755xIfmJ6_QKSWQt3U")
-ADMIN_ID = int(os.getenv("6562705089", "0"))
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
 
 DB = "microjob.db"
 
@@ -100,7 +100,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await update.message.reply_text(
         f"স্বাগতম {user.first_name}!\n\n"
-        "এখানে বৈধ Micro Job করে রিওয়ার্ড অর্জন করতে পারবেন।",
+        "এখানে বৈধ Micro Job করে রিওয়ার্ড অর্জন করতে পারবেন।",
         reply_markup=main_menu()
     )
 
@@ -146,7 +146,7 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         if not jobs:
             await query.message.reply_text(
-                "📭 বর্তমানে কোনো কাজ পাওয়া যাচ্ছে না।"
+                "📭 বর্তমানে কোনো কাজ পাওয়া যাচ্ছে না।"
             )
             return
 
@@ -252,7 +252,7 @@ async def messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
         con.close()
 
         await update.message.reply_text(
-            "✅ আপনার কাজের proof জমা হয়েছে।\n"
+            "✅ আপনার কাজের proof জমা হয়েছে।\n"
             "Admin যাচাই করার পর reward যোগ হবে।"
         )
 
@@ -335,7 +335,7 @@ async def messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data.clear()
 
         await update.message.reply_text(
-            "✅ Withdrawal request জমা হয়েছে।\n"
+            "✅ Withdrawal request জমা হয়েছে।\n"
             "Admin যাচাই করে পেমেন্ট করবেন।"
         )
 
@@ -354,7 +354,7 @@ async def messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 def run():
     if not BOT_TOKEN:
-        raise ValueError("BOT_TOKEN সেট করা হয়নি।")
+        raise ValueError("BOT_TOKEN সেট করা হয়নি।")
 
     setup()
 
