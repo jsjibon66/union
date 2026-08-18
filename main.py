@@ -1,11 +1,21 @@
 import os
 import sqlite3
+import asyncio
+import threading
+import time
+import hashlib
+import hmac
+import json
+import urllib.parse
 from html import escape
+
+from flask import Flask, request, jsonify, Response
 
 from telegram import (
     Update,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
+    WebAppInfo,
 )
 from telegram.ext import (
     Application,
@@ -15,6 +25,7 @@ from telegram.ext import (
     ContextTypes,
     filters,
 )
+
 
 # =========================================================
 # CONFIG
@@ -28,10 +39,33 @@ MAX_WITHDRAW = 5000
 
 REFERRAL_REWARD = 5.0
 
+# নতুন Ad Reward
+AD_REWARD = 0.20
+
+# Ad Zone
+AD_ZONE = "11601818"
+
 SUPPORT_USERNAME = "Hasanroy53"
 UPDATE_CHANNEL = "https://t.me/MicroJobBD1"
 
 DB_NAME = "bot.db"
+
+# Render/Railway/VPS থেকে এই URL Environment Variable-এ দিতে হবে
+# উদাহরণ:
+# https://your-app.onrender.com
+WEB_APP_URL = os.getenv("WEB_APP_URL", "").rstrip("/")
+
+PORT = int(os.getenv("PORT", "8080"))
+
+# একই User খুব দ্রুত বারবার Ad claim করতে পারবে না
+AD_COOLDOWN_SECONDS = 30
+
+
+# =========================================================
+# FLASK WEB APP
+# =========================================================
+
+web = Flask(__name__)
 
 
 # =========================================================
@@ -45,6 +79,7 @@ def db():
 
 
 def setup_database():
+
     con = db()
     cur = con.cursor()
 
@@ -104,6 +139,16 @@ def setup_database():
             amount REAL NOT NULL,
             kind TEXT NOT NULL,
             note TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+
+    # নতুন Ad Claims Table
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS ad_claims (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            reward REAL NOT NULL,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     """)
@@ -170,6 +215,7 @@ def add_user(user, referrer_id=None):
     con = db()
     cur = con.cursor()
 
+    # User নতুন হলে Referral সংরক্ষণ
     cur.execute("""
         INSERT OR IGNORE INTO users
         (user_id, name, username, balance, referred_by)
@@ -181,6 +227,7 @@ def add_user(user, referrer_id=None):
         referrer_id
     ))
 
+    # পুরোনো User-এর profile update
     cur.execute("""
         UPDATE users
         SET name=?, username=?
@@ -221,7 +268,10 @@ def add_balance(user_id, amount, kind, note):
         UPDATE users
         SET balance=balance+?
         WHERE user_id=?
-    """, (amount, user_id))
+    """, (
+        amount,
+        user_id
+    ))
 
     cur.execute("""
         INSERT INTO transactions
@@ -271,7 +321,9 @@ def task_completed_count(task_id):
         FROM submissions
         WHERE task_id=?
         AND status IN ('pending','approved')
-    """, (task_id,))
+    """, (
+        task_id,
+    ))
 
     count = cur.fetchone()[0]
 
@@ -281,12 +333,645 @@ def task_completed_count(task_id):
 
 
 # =========================================================
+# TELEGRAM WEB APP INITDATA VALIDATION
+# =========================================================
+
+def validate_telegram_init_data(init_data):
+
+    if not init_data or not BOT_TOKEN:
+        return None
+
+    try:
+
+        parsed = urllib.parse.parse_qsl(
+            init_data,
+            keep_blank_values=True
+        )
+
+        data = dict(parsed)
+
+        received_hash = data.pop("hash", None)
+
+        if not received_hash:
+            return None
+
+        data_check_string = "\n".join(
+            f"{key}={value}"
+            for key, value in sorted(data.items())
+        )
+
+        secret_key = hmac.new(
+            b"WebAppData",
+            BOT_TOKEN.encode(),
+            hashlib.sha256
+        ).digest()
+
+        calculated_hash = hmac.new(
+            secret_key,
+            data_check_string.encode(),
+            hashlib.sha256
+        ).hexdigest()
+
+        if not hmac.compare_digest(
+            calculated_hash,
+            received_hash
+        ):
+            return None
+
+        # init_data-এর auth_date যাচাই
+        auth_date = int(data.get("auth_date", "0"))
+
+        # 24 ঘণ্টার বেশি পুরোনো হলে reject
+        if abs(time.time() - auth_date) > 86400:
+            return None
+
+        user_json = data.get("user")
+
+        if not user_json:
+            return None
+
+        user_data = json.loads(user_json)
+
+        return user_data
+
+    except Exception:
+        return None
+
+
+# =========================================================
+# AD CLAIM
+# =========================================================
+
+def can_claim_ad(user_id):
+
+    con = db()
+    cur = con.cursor()
+
+    cur.execute("""
+        SELECT created_at
+        FROM ad_claims
+        WHERE user_id=?
+        ORDER BY id DESC
+        LIMIT 1
+    """, (
+        user_id,
+    ))
+
+    row = cur.fetchone()
+
+    con.close()
+
+    if not row:
+        return True
+
+    try:
+        last_time = time.mktime(
+            time.strptime(
+                row[0],
+                "%Y-%m-%d %H:%M:%S"
+            )
+        )
+
+        return (
+            time.time() - last_time
+            >= AD_COOLDOWN_SECONDS
+        )
+
+    except Exception:
+        return True
+
+
+def claim_ad_reward(user_id):
+
+    con = db()
+    cur = con.cursor()
+
+    # Transaction + claim একসাথে
+    try:
+
+        cur.execute("BEGIN IMMEDIATE")
+
+        cur.execute("""
+            SELECT created_at
+            FROM ad_claims
+            WHERE user_id=?
+            ORDER BY id DESC
+            LIMIT 1
+        """, (
+            user_id,
+        ))
+
+        row = cur.fetchone()
+
+        if row:
+
+            try:
+                last_time = time.mktime(
+                    time.strptime(
+                        row[0],
+                        "%Y-%m-%d %H:%M:%S"
+                    )
+                )
+
+                if (
+                    time.time() - last_time
+                    < AD_COOLDOWN_SECONDS
+                ):
+                    con.rollback()
+                    con.close()
+
+                    return False, "cooldown"
+
+            except Exception:
+                pass
+
+        cur.execute("""
+            UPDATE users
+            SET balance=balance+?
+            WHERE user_id=?
+        """, (
+            AD_REWARD,
+            user_id
+        ))
+
+        if cur.rowcount != 1:
+
+            con.rollback()
+            con.close()
+
+            return False, "user"
+
+        cur.execute("""
+            INSERT INTO ad_claims
+            (user_id, reward)
+            VALUES (?, ?)
+        """, (
+            user_id,
+            AD_REWARD
+        ))
+
+        cur.execute("""
+            INSERT INTO transactions
+            (user_id, amount, kind, note)
+            VALUES (?, ?, ?, ?)
+        """, (
+            user_id,
+            AD_REWARD,
+            "Ad Reward",
+            f"Rewarded Ad Zone {AD_ZONE}"
+        ))
+
+        con.commit()
+        con.close()
+
+        return True, "success"
+
+    except Exception:
+
+        try:
+            con.rollback()
+        except:
+            pass
+
+        con.close()
+
+        return False, "error"
+
+
+# =========================================================
+# WEB APP HTML
+# =========================================================
+
+@web.route("/")
+def web_home():
+
+    return Response(
+        """
+<!DOCTYPE html>
+<html lang="bn">
+<head>
+
+<meta charset="UTF-8">
+<meta name="viewport"
+      content="width=device-width, initial-scale=1.0">
+
+<title>Micro Job BD - Reward Ad</title>
+
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+
+<script
+ src="//libtl.com/sdk.js"
+ data-zone="11601818"
+ data-sdk="show_11601818">
+</script>
+
+<style>
+
+* {
+    box-sizing: border-box;
+}
+
+body {
+    margin: 0;
+    padding: 20px;
+    min-height: 100vh;
+    font-family:
+        Arial,
+        sans-serif;
+
+    background:
+        linear-gradient(
+            135deg,
+            #101827,
+            #172554
+        );
+
+    color: white;
+
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.card {
+    width: 100%;
+    max-width: 430px;
+
+    background:
+        rgba(255,255,255,0.08);
+
+    border:
+        1px solid
+        rgba(255,255,255,0.15);
+
+    border-radius: 25px;
+
+    padding: 30px 22px;
+
+    text-align: center;
+
+    backdrop-filter: blur(15px);
+
+    box-shadow:
+        0 20px 60px
+        rgba(0,0,0,0.35);
+}
+
+.logo {
+    font-size: 55px;
+    margin-bottom: 10px;
+}
+
+h1 {
+    margin: 0 0 10px;
+    font-size: 27px;
+}
+
+.subtitle {
+    opacity: 0.8;
+    line-height: 1.6;
+}
+
+.reward {
+    margin: 25px 0;
+
+    font-size: 42px;
+    font-weight: bold;
+
+    color: #ffd166;
+}
+
+button {
+    width: 100%;
+
+    border: 0;
+
+    border-radius: 15px;
+
+    padding: 17px;
+
+    font-size: 18px;
+    font-weight: bold;
+
+    cursor: pointer;
+
+    background:
+        linear-gradient(
+            135deg,
+            #22c55e,
+            #16a34a
+        );
+
+    color: white;
+
+    box-shadow:
+        0 10px 25px
+        rgba(34,197,94,0.25);
+}
+
+button:disabled {
+    opacity: 0.5;
+}
+
+.status {
+    min-height: 25px;
+
+    margin-top: 20px;
+
+    line-height: 1.5;
+}
+
+.balance {
+    margin-top: 15px;
+
+    padding: 13px;
+
+    border-radius: 12px;
+
+    background:
+        rgba(255,255,255,0.08);
+}
+
+.small {
+    margin-top: 20px;
+
+    font-size: 13px;
+
+    opacity: 0.6;
+
+    line-height: 1.5;
+}
+
+</style>
+
+</head>
+
+<body>
+
+<div class="card">
+
+    <div class="logo">🎁</div>
+
+    <h1>Rewarded Ad</h1>
+
+    <div class="subtitle">
+        সম্পূর্ণ বিজ্ঞাপন দেখুন এবং
+        আপনার Micro Job BD Balance-এ
+        Reward পান।
+    </div>
+
+    <div class="reward">
+        ৳0.20
+    </div>
+
+    <button
+        id="watchBtn"
+        onclick="watchAd()">
+
+        🎬 বিজ্ঞাপন দেখুন
+    </button>
+
+    <div
+        id="status"
+        class="status">
+    </div>
+
+    <div class="balance">
+        💰 Reward: <b>৳0.20</b>
+    </div>
+
+    <div class="small">
+        বিজ্ঞাপন সম্পূর্ণভাবে চালু হওয়ার পর
+        Reward claim করা হবে।
+    </div>
+
+</div>
+
+
+<script>
+
+const tg =
+    window.Telegram.WebApp;
+
+tg.ready();
+tg.expand();
+
+
+async function watchAd() {
+
+    const btn =
+        document.getElementById("watchBtn");
+
+    const status =
+        document.getElementById("status");
+
+    btn.disabled = true;
+
+    status.innerHTML =
+        "⏳ বিজ্ঞাপন প্রস্তুত হচ্ছে...";
+
+    try {
+
+        if (
+            typeof show_11601818 !==
+            "function"
+        ) {
+
+            throw new Error(
+                "Ad SDK পাওয়া যায়নি"
+            );
+
+        }
+
+        /*
+         * Rewarded Popup
+         *
+         * User ad শেষ করলে Promise resolve
+         */
+        await show_11601818("pop");
+
+        status.innerHTML =
+            "⏳ Reward যাচাই করা হচ্ছে...";
+
+        const initData =
+            tg.initData;
+
+        if (!initData) {
+
+            throw new Error(
+                "Telegram user data পাওয়া যায়নি"
+            );
+
+        }
+
+        const response =
+            await fetch(
+                "/api/ad-reward",
+                {
+                    method: "POST",
+
+                    headers: {
+                        "Content-Type":
+                            "application/json"
+                    },
+
+                    body: JSON.stringify({
+                        initData:
+                            initData
+                    })
+                }
+            );
+
+        const result =
+            await response.json();
+
+        if (result.success) {
+
+            status.innerHTML =
+                "🎉 সফল! ৳0.20 আপনার Balance-এ যোগ হয়েছে।";
+
+            tg.HapticFeedback
+              .notificationOccurred(
+                  "success"
+              );
+
+            setTimeout(() => {
+
+                tg.close();
+
+            }, 1800);
+
+        } else if (
+            result.reason === "cooldown"
+        ) {
+
+            status.innerHTML =
+                "⏳ একটু অপেক্ষা করুন। তারপর আবার Ad দেখতে পারবেন।";
+
+            btn.disabled = false;
+
+        } else {
+
+            status.innerHTML =
+                "❌ Reward দেওয়া যায়নি। আবার চেষ্টা করুন।";
+
+            btn.disabled = false;
+        }
+
+    } catch (error) {
+
+        console.error(error);
+
+        status.innerHTML =
+            "❌ বিজ্ঞাপন সম্পূর্ণ করা যায়নি।";
+
+        btn.disabled = false;
+    }
+}
+
+</script>
+
+</body>
+</html>
+        """,
+        mimetype="text/html"
+    )
+
+
+# =========================================================
+# AD REWARD API
+# =========================================================
+
+@web.route("/api/ad-reward", methods=["POST"])
+def ad_reward_api():
+
+    try:
+
+        data = request.get_json(
+            silent=True
+        ) or {}
+
+        init_data = data.get(
+            "initData",
+            ""
+        )
+
+        user_data = validate_telegram_init_data(
+            init_data
+        )
+
+        if not user_data:
+
+            return jsonify({
+                "success": False,
+                "reason": "invalid_user"
+            }), 403
+
+        user_id = int(
+            user_data["id"]
+        )
+
+        # User database-এ আছে কিনা
+        con = db()
+        cur = con.cursor()
+
+        cur.execute(
+            "SELECT user_id FROM users WHERE user_id=?",
+            (user_id,)
+        )
+
+        exists = cur.fetchone()
+
+        con.close()
+
+        if not exists:
+
+            return jsonify({
+                "success": False,
+                "reason": "user_not_found"
+            }), 404
+
+        success, reason = claim_ad_reward(
+            user_id
+        )
+
+        if success:
+
+            balance = get_balance(
+                user_id
+            )
+
+            return jsonify({
+                "success": True,
+                "reward": AD_REWARD,
+                "balance": balance
+            })
+
+        return jsonify({
+            "success": False,
+            "reason": reason
+        })
+
+    except Exception as e:
+
+        print(
+            "Ad reward error:",
+            e
+        )
+
+        return jsonify({
+            "success": False,
+            "reason": "server_error"
+        }), 500
+
+
+# =========================================================
 # USER MENU
 # =========================================================
 
 def user_menu():
 
-    return InlineKeyboardMarkup([
+    buttons = [
         [
             InlineKeyboardButton(
                 "📋 কাজ করুন",
@@ -295,6 +980,16 @@ def user_menu():
             InlineKeyboardButton(
                 "💰 ব্যালেন্স",
                 callback_data="balance"
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                "🎁 Ad দেখে ৳0.20",
+                web_app=WebAppInfo(
+                    url=WEB_APP_URL
+                    if WEB_APP_URL
+                    else "https://example.com"
+                )
             )
         ],
         [
@@ -329,7 +1024,9 @@ def user_menu():
                 callback_data="home"
             )
         ]
-    ])
+    ]
+
+    return InlineKeyboardMarkup(buttons)
 
 
 # =========================================================
@@ -388,25 +1085,114 @@ def admin_menu():
 # START
 # =========================================================
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def start(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
 
     user = update.effective_user
 
     referrer_id = None
 
     if context.args:
+
         arg = context.args[0]
 
         if arg.startswith("ref_"):
+
             try:
-                referrer_id = int(arg.replace("ref_", ""))
+                referrer_id = int(
+                    arg.replace(
+                        "ref_",
+                        ""
+                    )
+                )
+
             except:
                 referrer_id = None
 
     if referrer_id == user.id:
         referrer_id = None
 
-    add_user(user, referrer_id)
+    add_user(
+        user,
+        referrer_id
+    )
+
+    # নতুন referral reward
+    # নতুন User হলে এবং valid referrer থাকলে
+    if referrer_id:
+
+        con = db()
+        cur = con.cursor()
+
+        cur.execute("""
+            SELECT
+                referred_by,
+                referral_reward_paid
+            FROM users
+            WHERE user_id=?
+        """, (
+            user.id,
+        ))
+
+        current = cur.fetchone()
+
+        # referral_reward_paid=0 এবং referrer user আছে
+        if current and current[1] == 0:
+
+            cur.execute(
+                "SELECT user_id FROM users WHERE user_id=?",
+                (referrer_id,)
+            )
+
+            ref_exists = cur.fetchone()
+
+            if ref_exists:
+
+                cur.execute("""
+                    UPDATE users
+                    SET balance=balance+?
+                    WHERE user_id=?
+                """, (
+                    REFERRAL_REWARD,
+                    referrer_id
+                ))
+
+                cur.execute("""
+                    INSERT INTO transactions
+                    (user_id, amount, kind, note)
+                    VALUES (?, ?, ?, ?)
+                """, (
+                    referrer_id,
+                    REFERRAL_REWARD,
+                    "Referral Reward",
+                    f"Referral User #{user.id}"
+                ))
+
+                cur.execute("""
+                    UPDATE users
+                    SET referral_reward_paid=1
+                    WHERE user_id=?
+                """, (
+                    user.id,
+                ))
+
+                con.commit()
+
+                try:
+
+                    await context.bot.send_message(
+                        referrer_id,
+                        "🎉 <b>New Referral!</b>\n\n"
+                        f"💰 আপনি {money(REFERRAL_REWARD)} Referral Reward পেয়েছেন।",
+                        parse_mode="HTML"
+                    )
+
+                except:
+                    pass
+
+        con.close()
 
     context.user_data.clear()
 
@@ -426,6 +1212,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "🎉 <b>স্বাগতম Micro Job BD!</b>\n\n"
             "📋 কাজ করুন\n"
             "💰 Reward উপার্জন করুন\n"
+            "🎁 Ad দেখে প্রতি বার ৳0.20 Reward নিন\n"
             "👥 বন্ধু রেফার করে প্রতি সফল Referral-এ "
             f"{money(REFERRAL_REWARD)} পান\n"
             f"💸 Minimum withdrawal: {money(MIN_WITHDRAW)}\n\n"
@@ -439,7 +1226,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # BUTTON HANDLER
 # =========================================================
 
-async def button_handler(update, context):
+async def button_handler(
+    update,
+    context
+):
 
     query = update.callback_query
 
@@ -496,7 +1286,9 @@ async def button_handler(update, context):
 
     if data == "balance":
 
-        balance = get_balance(user_id)
+        balance = get_balance(
+            user_id
+        )
 
         await query.message.reply_text(
             f"💰 <b>আপনার Balance</b>\n\n"
@@ -517,7 +1309,13 @@ async def button_handler(update, context):
         cur = con.cursor()
 
         cur.execute("""
-            SELECT id, title, description, reward, link, max_users
+            SELECT
+                id,
+                title,
+                description,
+                reward,
+                link,
+                max_users
             FROM tasks
             WHERE active=1
             ORDER BY id DESC
@@ -531,11 +1329,23 @@ async def button_handler(update, context):
 
         for task in tasks:
 
-            task_id, title, description, reward, link, max_users = task
+            (
+                task_id,
+                title,
+                description,
+                reward,
+                link,
+                max_users
+            ) = task
 
-            done_count = task_completed_count(task_id)
+            done_count = task_completed_count(
+                task_id
+            )
 
-            if max_users > 0 and done_count >= max_users:
+            if (
+                max_users > 0
+                and done_count >= max_users
+            ):
 
                 con = db()
                 cur = con.cursor()
@@ -544,7 +1354,9 @@ async def button_handler(update, context):
                     UPDATE tasks
                     SET active=0
                     WHERE id=?
-                """, (task_id,))
+                """, (
+                    task_id,
+                ))
 
                 con.commit()
                 con.close()
@@ -557,7 +1369,8 @@ async def button_handler(update, context):
             cur.execute("""
                 SELECT status
                 FROM submissions
-                WHERE user_id=? AND task_id=?
+                WHERE user_id=?
+                AND task_id=?
             """, (
                 user_id,
                 task_id
@@ -573,9 +1386,15 @@ async def button_handler(update, context):
             shown += 1
 
             if max_users == 0:
+
                 limit_text = "♾️ Unlimited"
+
             else:
-                remaining = max_users - done_count
+
+                remaining = (
+                    max_users - done_count
+                )
+
                 limit_text = (
                     f"👥 Limit: {max_users}\n"
                     f"📌 বাকি: {remaining}"
@@ -584,6 +1403,7 @@ async def button_handler(update, context):
             keyboard = []
 
             if link:
+
                 keyboard.append([
                     InlineKeyboardButton(
                         "🔗 Task খুলুন",
@@ -604,7 +1424,9 @@ async def button_handler(update, context):
                 f"💰 Reward: {money(reward)}\n"
                 f"{limit_text}",
                 parse_mode="HTML",
-                reply_markup=InlineKeyboardMarkup(keyboard)
+                reply_markup=InlineKeyboardMarkup(
+                    keyboard
+                )
             )
 
         if shown == 0:
@@ -622,7 +1444,9 @@ async def button_handler(update, context):
 
     if data.startswith("submit_"):
 
-        task_id = int(data.split("_")[1])
+        task_id = int(
+            data.split("_")[1]
+        )
 
         con = db()
         cur = con.cursor()
@@ -631,7 +1455,9 @@ async def button_handler(update, context):
             SELECT title, max_users
             FROM tasks
             WHERE id=? AND active=1
-        """, (task_id,))
+        """, (
+            task_id,
+        ))
 
         task = cur.fetchone()
 
@@ -649,7 +1475,9 @@ async def button_handler(update, context):
 
         if max_users > 0:
 
-            count = task_completed_count(task_id)
+            count = task_completed_count(
+                task_id
+            )
 
             if count >= max_users:
 
@@ -659,7 +1487,9 @@ async def button_handler(update, context):
 
                 return
 
-        context.user_data["proof_task"] = task_id
+        context.user_data[
+            "proof_task"
+        ] = task_id
 
         await query.message.reply_text(
             "📸 <b>Proof জমা দিন</b>\n\n"
@@ -676,7 +1506,9 @@ async def button_handler(update, context):
 
     if data == "withdraw":
 
-        balance = get_balance(user_id)
+        balance = get_balance(
+            user_id
+        )
 
         if balance < MIN_WITHDRAW:
 
@@ -689,7 +1521,9 @@ async def button_handler(update, context):
 
             return
 
-        context.user_data["withdraw_step"] = "amount"
+        context.user_data[
+            "withdraw_step"
+        ] = "amount"
 
         await query.message.reply_text(
             "💸 <b>Withdrawal</b>\n\n"
@@ -716,7 +1550,9 @@ async def button_handler(update, context):
             WHERE user_id=?
             ORDER BY id DESC
             LIMIT 20
-        """, (user_id,))
+        """, (
+            user_id,
+        ))
 
         rows = cur.fetchall()
 
@@ -724,11 +1560,15 @@ async def button_handler(update, context):
 
         if not rows:
 
-            text = "📜 এখনো কোনো Transaction নেই।"
+            text = (
+                "📜 এখনো কোনো Transaction নেই।"
+            )
 
         else:
 
-            text = "📜 <b>Transaction History</b>\n\n"
+            text = (
+                "📜 <b>Transaction History</b>\n\n"
+            )
 
             for amount, kind, note in rows:
 
@@ -788,7 +1628,10 @@ async def button_handler(update, context):
                 [
                     InlineKeyboardButton(
                         "👤 Admin-কে Message করুন",
-                        url=f"https://t.me/{SUPPORT_USERNAME}"
+                        url=(
+                            f"https://t.me/"
+                            f"{SUPPORT_USERNAME}"
+                        )
                     )
                 ],
                 [
@@ -806,9 +1649,11 @@ async def button_handler(update, context):
     # ADMIN CHECK
     # =====================================================
 
-    if data.startswith("admin_") or \
-       data.startswith("approve_") or \
-       data.startswith("reject_"):
+    if (
+        data.startswith("admin_")
+        or data.startswith("approve_")
+        or data.startswith("reject_")
+    ):
 
         if user_id != ADMIN_ID:
             return
@@ -822,7 +1667,9 @@ async def button_handler(update, context):
         con = db()
         cur = con.cursor()
 
-        cur.execute("SELECT COUNT(*) FROM users")
+        cur.execute(
+            "SELECT COUNT(*) FROM users"
+        )
         users = cur.fetchone()[0]
 
         cur.execute("""
@@ -832,7 +1679,9 @@ async def button_handler(update, context):
         """)
         referred = cur.fetchone()[0]
 
-        cur.execute("SELECT COUNT(*) FROM tasks")
+        cur.execute(
+            "SELECT COUNT(*) FROM tasks"
+        )
         tasks = cur.fetchone()[0]
 
         cur.execute("""
@@ -849,6 +1698,17 @@ async def button_handler(update, context):
         """)
         withdrawals = cur.fetchone()[0]
 
+        cur.execute(
+            "SELECT COUNT(*) FROM ad_claims"
+        )
+        ads = cur.fetchone()[0]
+
+        cur.execute("""
+            SELECT COALESCE(SUM(reward), 0)
+            FROM ad_claims
+        """)
+        ad_money = cur.fetchone()[0]
+
         con.close()
 
         await query.message.reply_text(
@@ -857,7 +1717,9 @@ async def button_handler(update, context):
             f"👥 Referred Users: {referred}\n"
             f"📋 Tasks: {tasks}\n"
             f"📝 Pending Proof: {proofs}\n"
-            f"💸 Pending Withdrawal: {withdrawals}",
+            f"💸 Pending Withdrawal: {withdrawals}\n"
+            f"🎬 Total Ad Views: {ads}\n"
+            f"💰 Ad Rewards Paid: {money(ad_money)}",
             parse_mode="HTML",
             reply_markup=admin_menu()
         )
@@ -874,7 +1736,11 @@ async def button_handler(update, context):
         cur = con.cursor()
 
         cur.execute("""
-            SELECT user_id, name, username, balance
+            SELECT
+                user_id,
+                name,
+                username,
+                balance
             FROM users
             ORDER BY user_id DESC
             LIMIT 30
@@ -895,13 +1761,23 @@ async def button_handler(update, context):
 
         text = "👥 <b>Users</b>\n\n"
 
-        for uid, name, username, balance in rows:
+        for (
+            uid,
+            name,
+            username,
+            balance
+        ) in rows:
 
-            uname = f"@{username}" if username else "No Username"
+            uname = (
+                f"@{username}"
+                if username
+                else "No Username"
+            )
 
             text += (
                 f"🆔 <code>{uid}</code>\n"
-                f"👤 {safe(name)} ({safe(uname)})\n"
+                f"👤 {safe(name)} "
+                f"({safe(uname)})\n"
                 f"💰 {money(balance)}\n\n"
             )
 
@@ -923,7 +1799,12 @@ async def button_handler(update, context):
         cur = con.cursor()
 
         cur.execute("""
-            SELECT id, title, reward, max_users, active
+            SELECT
+                id,
+                title,
+                reward,
+                max_users,
+                active
             FROM tasks
             ORDER BY id DESC
         """)
@@ -943,11 +1824,23 @@ async def button_handler(update, context):
 
         text = "📋 <b>All Tasks</b>\n\n"
 
-        for tid, title, reward, limit, active in rows:
+        for (
+            tid,
+            title,
+            reward,
+            limit,
+            active
+        ) in rows:
 
-            used = task_completed_count(tid)
+            used = task_completed_count(
+                tid
+            )
 
-            status = "🟢 Active" if active else "🔴 Off"
+            status = (
+                "🟢 Active"
+                if active
+                else "🔴 Off"
+            )
 
             limit_text = (
                 "Unlimited"
@@ -978,7 +1871,9 @@ async def button_handler(update, context):
 
         context.user_data.clear()
 
-        context.user_data["admin_step"] = "title"
+        context.user_data[
+            "admin_step"
+        ] = "title"
 
         await query.message.reply_text(
             "➕ <b>New Task</b>\n\n"
@@ -1006,7 +1901,8 @@ async def button_handler(update, context):
                 t.title,
                 t.reward
             FROM submissions s
-            JOIN tasks t ON t.id=s.task_id
+            JOIN tasks t
+                ON t.id=s.task_id
             WHERE s.status='pending'
             ORDER BY s.id DESC
         """)
@@ -1024,7 +1920,14 @@ async def button_handler(update, context):
 
             return
 
-        for sid, uid, tid, proof, title, reward in rows:
+        for (
+            sid,
+            uid,
+            tid,
+            proof,
+            title,
+            reward
+        ) in rows:
 
             keyboard = InlineKeyboardMarkup([
                 [
@@ -1041,11 +1944,16 @@ async def button_handler(update, context):
 
             if proof.startswith("PHOTO:"):
 
-                file_id = proof.split("|CAPTION:")[0].replace(
-                    "PHOTO:", ""
+                file_id = (
+                    proof
+                    .split("|CAPTION:")[0]
+                    .replace("PHOTO:", "")
                 )
 
-                caption = proof.split("|CAPTION:", 1)[1]
+                caption = (
+                    proof
+                    .split("|CAPTION:", 1)[1]
+                )
 
                 await context.bot.send_photo(
                     chat_id=ADMIN_ID,
@@ -1080,17 +1988,26 @@ async def button_handler(update, context):
 
     if data.startswith("approve_"):
 
-        sid = int(data.split("_")[1])
+        sid = int(
+            data.split("_")[1]
+        )
 
         con = db()
         cur = con.cursor()
 
         cur.execute("""
-            SELECT s.user_id, s.task_id, t.reward
+            SELECT
+                s.user_id,
+                s.task_id,
+                t.reward
             FROM submissions s
-            JOIN tasks t ON t.id=s.task_id
-            WHERE s.id=? AND s.status='pending'
-        """, (sid,))
+            JOIN tasks t
+                ON t.id=s.task_id
+            WHERE s.id=?
+            AND s.status='pending'
+        """, (
+            sid,
+        ))
 
         row = cur.fetchone()
 
@@ -1110,7 +2027,9 @@ async def button_handler(update, context):
             UPDATE submissions
             SET status='approved'
             WHERE id=?
-        """, (sid,))
+        """, (
+            sid,
+        ))
 
         cur.execute("""
             UPDATE users
@@ -1135,7 +2054,9 @@ async def button_handler(update, context):
         con.commit()
         con.close()
 
-        new_balance = get_balance(target_user)
+        new_balance = get_balance(
+            target_user
+        )
 
         await context.bot.send_message(
             target_user,
@@ -1157,7 +2078,9 @@ async def button_handler(update, context):
 
     if data.startswith("reject_"):
 
-        sid = int(data.split("_")[1])
+        sid = int(
+            data.split("_")[1]
+        )
 
         con = db()
         cur = con.cursor()
@@ -1165,8 +2088,11 @@ async def button_handler(update, context):
         cur.execute("""
             SELECT user_id
             FROM submissions
-            WHERE id=? AND status='pending'
-        """, (sid,))
+            WHERE id=?
+            AND status='pending'
+        """, (
+            sid,
+        ))
 
         row = cur.fetchone()
 
@@ -1178,15 +2104,22 @@ async def button_handler(update, context):
                 UPDATE submissions
                 SET status='rejected'
                 WHERE id=?
-            """, (sid,))
+            """, (
+                sid,
+            ))
 
             con.commit()
 
-            await context.bot.send_message(
-                target_user,
-                "❌ আপনার Task Proof Reject করা হয়েছে।\n\n"
-                "আবার সঠিক Proof জমা দিতে পারেন।"
-            )
+            try:
+
+                await context.bot.send_message(
+                    target_user,
+                    "❌ আপনার Task Proof Reject করা হয়েছে।\n\n"
+                    "আবার সঠিক Proof জমা দিতে পারেন।"
+                )
+
+            except:
+                pass
 
         con.close()
 
@@ -1206,7 +2139,12 @@ async def button_handler(update, context):
         cur = con.cursor()
 
         cur.execute("""
-            SELECT id, user_id, amount, method, number
+            SELECT
+                id,
+                user_id,
+                amount,
+                method,
+                number
             FROM withdrawals
             WHERE status='pending'
             ORDER BY id DESC
@@ -1225,7 +2163,13 @@ async def button_handler(update, context):
 
             return
 
-        for wid, uid, amount, method, number in rows:
+        for (
+            wid,
+            uid,
+            amount,
+            method,
+            number
+        ) in rows:
 
             keyboard = InlineKeyboardMarkup([
                 [
@@ -1258,7 +2202,9 @@ async def button_handler(update, context):
 
     if data.startswith("approve_w_"):
 
-        wid = int(data.split("_")[2])
+        wid = int(
+            data.split("_")[2]
+        )
 
         con = db()
         cur = con.cursor()
@@ -1266,8 +2212,11 @@ async def button_handler(update, context):
         cur.execute("""
             SELECT user_id, amount
             FROM withdrawals
-            WHERE id=? AND status='pending'
-        """, (wid,))
+            WHERE id=?
+            AND status='pending'
+        """, (
+            wid,
+        ))
 
         row = cur.fetchone()
 
@@ -1287,7 +2236,9 @@ async def button_handler(update, context):
             UPDATE withdrawals
             SET status='approved'
             WHERE id=?
-        """, (wid,))
+        """, (
+            wid,
+        ))
 
         con.commit()
         con.close()
@@ -1309,7 +2260,9 @@ async def button_handler(update, context):
 
     if data.startswith("reject_w_"):
 
-        wid = int(data.split("_")[2])
+        wid = int(
+            data.split("_")[2]
+        )
 
         con = db()
         cur = con.cursor()
@@ -1317,8 +2270,11 @@ async def button_handler(update, context):
         cur.execute("""
             SELECT user_id, amount
             FROM withdrawals
-            WHERE id=? AND status='pending'
-        """, (wid,))
+            WHERE id=?
+            AND status='pending'
+        """, (
+            wid,
+        ))
 
         row = cur.fetchone()
 
@@ -1338,7 +2294,9 @@ async def button_handler(update, context):
             UPDATE withdrawals
             SET status='rejected'
             WHERE id=?
-        """, (wid,))
+        """, (
+            wid,
+        ))
 
         cur.execute("""
             UPDATE users
@@ -1383,7 +2341,9 @@ async def button_handler(update, context):
 
         context.user_data.clear()
 
-        context.user_data["admin_step"] = "broadcast"
+        context.user_data[
+            "admin_step"
+        ] = "broadcast"
 
         await query.message.reply_text(
             "📢 <b>Broadcast</b>\n\n"
@@ -1398,13 +2358,19 @@ async def button_handler(update, context):
 # PHOTO PROOF
 # =========================================================
 
-async def photo_handler(update, context):
+async def photo_handler(
+    update,
+    context
+):
 
     user = update.effective_user
 
     add_user(user)
 
-    if "proof_task" not in context.user_data:
+    if (
+        "proof_task"
+        not in context.user_data
+    ):
 
         await update.message.reply_text(
             "📸 আগে একটি Task নির্বাচন করুন।",
@@ -1413,22 +2379,31 @@ async def photo_handler(update, context):
 
         return
 
-    task_id = context.user_data["proof_task"]
+    task_id = context.user_data[
+        "proof_task"
+    ]
 
     con = db()
     cur = con.cursor()
 
     cur.execute("""
-        SELECT title, reward, max_users, active
+        SELECT
+            title,
+            reward,
+            max_users,
+            active
         FROM tasks
         WHERE id=?
-    """, (task_id,))
+    """, (
+        task_id,
+    ))
 
     task = cur.fetchone()
 
     if not task:
 
         con.close()
+
         context.user_data.clear()
 
         await update.message.reply_text(
@@ -1437,11 +2412,17 @@ async def photo_handler(update, context):
 
         return
 
-    title, reward, max_users, active = task
+    (
+        title,
+        reward,
+        max_users,
+        active
+    ) = task
 
     if not active:
 
         con.close()
+
         context.user_data.clear()
 
         await update.message.reply_text(
@@ -1452,11 +2433,14 @@ async def photo_handler(update, context):
 
     if max_users > 0:
 
-        count = task_completed_count(task_id)
+        count = task_completed_count(
+            task_id
+        )
 
         if count >= max_users:
 
             con.close()
+
             context.user_data.clear()
 
             await update.message.reply_text(
@@ -1468,7 +2452,8 @@ async def photo_handler(update, context):
     cur.execute("""
         SELECT id
         FROM submissions
-        WHERE user_id=? AND task_id=?
+        WHERE user_id=?
+        AND task_id=?
     """, (
         user.id,
         task_id
@@ -1477,6 +2462,7 @@ async def photo_handler(update, context):
     if cur.fetchone():
 
         con.close()
+
         context.user_data.clear()
 
         await update.message.reply_text(
@@ -1489,10 +2475,14 @@ async def photo_handler(update, context):
 
     file_id = photo.file_id
 
-    caption = update.message.caption or ""
+    caption = (
+        update.message.caption
+        or ""
+    )
 
     proof = (
-        f"PHOTO:{file_id}|CAPTION:{caption}"
+        f"PHOTO:{file_id}"
+        f"|CAPTION:{caption}"
     )
 
     cur.execute("""
@@ -1537,7 +2527,8 @@ async def photo_handler(update, context):
             f"👤 User: <code>{user.id}</code>\n"
             f"📋 Task: {safe(title)}\n"
             f"💰 Reward: {money(reward)}\n\n"
-            f"📄 Caption:\n{safe(caption) if caption else 'None'}"
+            f"📄 Caption:\n"
+            f"{safe(caption) if caption else 'None'}"
         ),
         parse_mode="HTML",
         reply_markup=keyboard
@@ -1548,11 +2539,16 @@ async def photo_handler(update, context):
 # TEXT HANDLER
 # =========================================================
 
-async def text_handler(update, context):
+async def text_handler(
+    update,
+    context
+):
 
     user = update.effective_user
 
-    text = update.message.text.strip()
+    text = (
+        update.message.text.strip()
+    )
 
     add_user(user)
 
@@ -1560,36 +2556,59 @@ async def text_handler(update, context):
     # WITHDRAW AMOUNT
     # =====================================================
 
-    if context.user_data.get("withdraw_step") == "amount":
+    if (
+        context.user_data.get(
+            "withdraw_step"
+        )
+        == "amount"
+    ):
 
         try:
             amount = float(text)
+
         except:
+
             await update.message.reply_text(
                 "❌ সঠিক Amount লিখুন। যেমন: 100"
             )
+
             return
 
         if amount < MIN_WITHDRAW:
+
             await update.message.reply_text(
-                f"❌ Minimum Withdrawal {money(MIN_WITHDRAW)}"
+                f"❌ Minimum Withdrawal "
+                f"{money(MIN_WITHDRAW)}"
             )
+
             return
 
         if amount > MAX_WITHDRAW:
+
             await update.message.reply_text(
-                f"❌ Maximum Withdrawal {money(MAX_WITHDRAW)}"
+                f"❌ Maximum Withdrawal "
+                f"{money(MAX_WITHDRAW)}"
             )
+
             return
 
-        if amount > get_balance(user.id):
+        if amount > get_balance(
+            user.id
+        ):
+
             await update.message.reply_text(
                 "❌ আপনার Balance যথেষ্ট নয়।"
             )
+
             return
 
-        context.user_data["withdraw_amount"] = amount
-        context.user_data["withdraw_step"] = "method"
+        context.user_data[
+            "withdraw_amount"
+        ] = amount
+
+        context.user_data[
+            "withdraw_step"
+        ] = "method"
 
         await update.message.reply_text(
             "📱 Payment Method লিখুন:\n\n"
@@ -1602,21 +2621,37 @@ async def text_handler(update, context):
     # WITHDRAW METHOD
     # =====================================================
 
-    if context.user_data.get("withdraw_step") == "method":
+    if (
+        context.user_data.get(
+            "withdraw_step"
+        )
+        == "method"
+    ):
 
         method = text.lower()
 
-        if method not in ["bkash", "nagad"]:
+        if method not in [
+            "bkash",
+            "nagad"
+        ]:
+
             await update.message.reply_text(
                 "❌ শুধু bKash অথবা Nagad লিখুন।"
             )
+
             return
 
-        context.user_data["withdraw_method"] = (
-            "bKash" if method == "bkash" else "Nagad"
+        context.user_data[
+            "withdraw_method"
+        ] = (
+            "bKash"
+            if method == "bkash"
+            else "Nagad"
         )
 
-        context.user_data["withdraw_step"] = "number"
+        context.user_data[
+            "withdraw_step"
+        ] = "number"
 
         await update.message.reply_text(
             "☎️ আপনার bKash/Nagad Number লিখুন।"
@@ -1628,15 +2663,26 @@ async def text_handler(update, context):
     # WITHDRAW NUMBER
     # =====================================================
 
-    if context.user_data.get("withdraw_step") == "number":
+    if (
+        context.user_data.get(
+            "withdraw_step"
+        )
+        == "number"
+    ):
 
-        amount = context.user_data["withdraw_amount"]
+        amount = context.user_data[
+            "withdraw_amount"
+        ]
 
-        method = context.user_data["withdraw_method"]
+        method = context.user_data[
+            "withdraw_method"
+        ]
 
         number = text
 
-        if amount > get_balance(user.id):
+        if amount > get_balance(
+            user.id
+        ):
 
             context.user_data.clear()
 
@@ -1646,7 +2692,10 @@ async def text_handler(update, context):
 
             return
 
-        if not remove_balance(user.id, amount):
+        if not remove_balance(
+            user.id,
+            amount
+        ):
 
             context.user_data.clear()
 
@@ -1712,9 +2761,14 @@ async def text_handler(update, context):
     # TEXT PROOF
     # =====================================================
 
-    if "proof_task" in context.user_data:
+    if (
+        "proof_task"
+        in context.user_data
+    ):
 
-        task_id = context.user_data["proof_task"]
+        task_id = context.user_data[
+            "proof_task"
+        ]
 
         con = db()
         cur = con.cursor()
@@ -1738,6 +2792,7 @@ async def text_handler(update, context):
         except sqlite3.IntegrityError:
 
             con.close()
+
             context.user_data.clear()
 
             await update.message.reply_text(
@@ -1750,7 +2805,9 @@ async def text_handler(update, context):
             SELECT title, reward
             FROM tasks
             WHERE id=?
-        """, (task_id,))
+        """, (
+            task_id,
+        ))
 
         task = cur.fetchone()
 
@@ -1769,8 +2826,10 @@ async def text_handler(update, context):
             "📝 <b>NEW TEXT PROOF</b>\n\n"
             f"🆔 Proof #{sid}\n"
             f"👤 User: <code>{user.id}</code>\n"
-            f"📋 Task: {safe(task[0] if task else 'Unknown')}\n"
-            f"💰 Reward: {money(task[1] if task else 0)}\n\n"
+            f"📋 Task: "
+            f"{safe(task[0] if task else 'Unknown')}\n"
+            f"💰 Reward: "
+            f"{money(task[1] if task else 0)}\n\n"
             f"📄 Proof:\n{safe(text)}",
             parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup([
@@ -1791,17 +2850,23 @@ async def text_handler(update, context):
 
     if user.id == ADMIN_ID:
 
-        step = context.user_data.get("admin_step")
+        step = context.user_data.get(
+            "admin_step"
+        )
 
         # -------------------------------------------------
-        # NEW TASK: TITLE
+        # TITLE
         # -------------------------------------------------
 
         if step == "title":
 
-            context.user_data["new_title"] = text
+            context.user_data[
+                "new_title"
+            ] = text
 
-            context.user_data["admin_step"] = "description"
+            context.user_data[
+                "admin_step"
+            ] = "description"
 
             await update.message.reply_text(
                 "📝 Task Description লিখুন।"
@@ -1815,9 +2880,13 @@ async def text_handler(update, context):
 
         if step == "description":
 
-            context.user_data["new_description"] = text
+            context.user_data[
+                "new_description"
+            ] = text
 
-            context.user_data["admin_step"] = "reward"
+            context.user_data[
+                "admin_step"
+            ] = "reward"
 
             await update.message.reply_text(
                 "💰 Task Reward লিখুন। যেমন: 5"
@@ -1832,7 +2901,9 @@ async def text_handler(update, context):
         if step == "reward":
 
             try:
+
                 reward = float(text)
+
             except:
 
                 await update.message.reply_text(
@@ -1841,9 +2912,13 @@ async def text_handler(update, context):
 
                 return
 
-            context.user_data["new_reward"] = reward
+            context.user_data[
+                "new_reward"
+            ] = reward
 
-            context.user_data["admin_step"] = "link"
+            context.user_data[
+                "admin_step"
+            ] = "link"
 
             await update.message.reply_text(
                 "🔗 Task-এর Link পাঠান।"
@@ -1857,9 +2932,13 @@ async def text_handler(update, context):
 
         if step == "link":
 
-            context.user_data["new_link"] = text
+            context.user_data[
+                "new_link"
+            ] = text
 
-            context.user_data["admin_step"] = "limit"
+            context.user_data[
+                "admin_step"
+            ] = "limit"
 
             await update.message.reply_text(
                 "👥 <b>Task Limit</b>\n\n"
@@ -1881,7 +2960,9 @@ async def text_handler(update, context):
         if step == "limit":
 
             try:
+
                 limit = int(text)
+
             except:
 
                 await update.message.reply_text(
@@ -1898,13 +2979,21 @@ async def text_handler(update, context):
 
                 return
 
-            title = context.user_data["new_title"]
+            title = context.user_data[
+                "new_title"
+            ]
 
-            description = context.user_data["new_description"]
+            description = context.user_data[
+                "new_description"
+            ]
 
-            reward = context.user_data["new_reward"]
+            reward = context.user_data[
+                "new_reward"
+            ]
 
-            link = context.user_data["new_link"]
+            link = context.user_data[
+                "new_link"
+            ]
 
             con = db()
             cur = con.cursor()
@@ -1979,6 +3068,11 @@ async def text_handler(update, context):
 
                     sent += 1
 
+                    # Telegram flood limit এড়াতে
+                    await asyncio.sleep(
+                        0.04
+                    )
+
                 except:
 
                     failed += 1
@@ -2008,22 +3102,49 @@ async def text_handler(update, context):
 
 
 # =========================================================
+# WEB SERVER
+# =========================================================
+
+def run_web():
+
+    web.run(
+        host="0.0.0.0",
+        port=PORT,
+        threaded=True
+    )
+
+
+# =========================================================
 # MAIN
 # =========================================================
 
 def main():
 
     if not BOT_TOKEN:
+
         raise RuntimeError(
             "BOT_TOKEN সেট করা হয়নি।"
         )
 
     if not ADMIN_ID:
+
         raise RuntimeError(
             "ADMIN_ID সেট করা হয়নি।"
         )
 
+    if not WEB_APP_URL:
+
+        print(
+            "⚠️ WARNING: WEB_APP_URL সেট করা হয়নি।"
+        )
+
     setup_database()
+
+    # Web Server আলাদা Thread-এ
+    threading.Thread(
+        target=run_web,
+        daemon=True
+    ).start()
 
     app = (
         Application
@@ -2040,14 +3161,14 @@ def main():
         )
     )
 
-    # All buttons
+    # Buttons
     app.add_handler(
         CallbackQueryHandler(
             button_handler
         )
     )
 
-    # Photo / Screenshot proof
+    # Photo proof
     app.add_handler(
         MessageHandler(
             filters.PHOTO,
@@ -2055,7 +3176,7 @@ def main():
         )
     )
 
-    # Text messages
+    # Text
     app.add_handler(
         MessageHandler(
             filters.TEXT & ~filters.COMMAND,
@@ -2063,7 +3184,9 @@ def main():
         )
     )
 
-    print("🤖 Micro Job BD Bot is running...")
+    print(
+        "🤖 Micro Job BD Bot is running..."
+    )
 
     app.run_polling()
 
