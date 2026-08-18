@@ -408,12 +408,22 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif data == "support":
 
-        await query.message.reply_text(
-            "🎧 <b>Support</b>\n\n"
-            "সমস্যা হলে Admin-এর সাথে যোগাযোগ করুন।",
-            parse_mode="HTML",
-            reply_markup=user_menu()
-        )
+    support_keyboard = InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton(
+                "👤 Admin-এর সাথে যোগাযোগ করুন",
+                url="https://t.me/Hasanroy53"
+            )
+        ]
+    ])
+
+    await query.message.reply_text(
+        "🎧 <b>Support</b>\n\n"
+        "কোনো সমস্যা হলে আমাদের Admin-এর সাথে যোগাযোগ করুন।\n\n"
+        "👤 Admin: @Hasanroy53",
+        parse_mode="HTML",
+        reply_markup=support_keyboard
+    )
 
     # =========================
     # ADMIN STATISTICS
