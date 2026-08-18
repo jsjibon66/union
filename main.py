@@ -1,5 +1,7 @@
 import os
 import sqlite3
+from html import escape
+
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application,
@@ -150,6 +152,21 @@ def admin_menu():
     ])
 
 
+def proof_buttons(submission_id):
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton(
+                "✅ Approve",
+                callback_data=f"approve_{submission_id}"
+            ),
+            InlineKeyboardButton(
+                "❌ Reject",
+                callback_data=f"reject_{submission_id}"
+            )
+        ]
+    ])
+
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     user = update.effective_user
@@ -269,8 +286,8 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             ])
 
             await query.message.reply_text(
-                f"📋 <b>{title}</b>\n\n"
-                f"📝 {description or 'কোনো বিবরণ নেই'}\n\n"
+                f"📋 <b>{escape(str(title))}</b>\n\n"
+                f"📝 {escape(str(description or 'কোনো বিবরণ নেই'))}\n\n"
                 f"💰 Reward: ৳{reward:.2f}",
                 parse_mode="HTML",
                 reply_markup=InlineKeyboardMarkup(keyboard)
@@ -288,7 +305,8 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         await query.message.reply_text(
             "📸 <b>Proof জমা দিন</b>\n\n"
-            "Task সম্পন্ন করার screenshot অথবা প্রয়োজনীয় তথ্য পাঠান।",
+            "Task সম্পন্ন করার screenshot/photo পাঠান।\n\n"
+            "অথবা প্রয়োজনীয় তথ্য লিখেও পাঠাতে পারেন।",
             parse_mode="HTML"
         )
 
@@ -353,8 +371,8 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
                 text += (
                     f"💰 ৳{amount:.2f}\n"
-                    f"📌 {kind}\n"
-                    f"📝 {note}\n\n"
+                    f"📌 {escape(str(kind))}\n"
+                    f"📝 {escape(str(note))}\n\n"
                 )
 
         await query.message.reply_text(
@@ -379,7 +397,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.message.reply_text(
             "👥 <b>Referral</b>\n\n"
             "আপনার Referral Link:\n\n"
-            f"<code>{link}</code>",
+            f"<code>{escape(link)}</code>",
             parse_mode="HTML",
             reply_markup=user_menu()
         )
@@ -505,7 +523,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             status = "🟢 Active" if active else "🔴 Off"
 
             text += (
-                f"#{task_id} — {title}\n"
+                f"#{task_id} — {escape(str(title))}\n"
                 f"💰 ৳{reward:.2f}\n"
                 f"{status}\n\n"
             )
@@ -574,28 +592,44 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         for submission_id, uid, task_id, proof, title, reward in rows:
 
-            keyboard = InlineKeyboardMarkup([
-                [
-                    InlineKeyboardButton(
-                        "✅ Approve",
-                        callback_data=f"approve_{submission_id}"
-                    ),
-                    InlineKeyboardButton(
-                        "❌ Reject",
-                        callback_data=f"reject_{submission_id}"
-                    )
-                ]
-            ])
-
-            await query.message.reply_text(
+            caption = (
                 f"📝 <b>Proof #{submission_id}</b>\n\n"
                 f"👤 User: <code>{uid}</code>\n"
-                f"📋 Task: {title}\n"
-                f"💰 Reward: ৳{reward:.2f}\n\n"
-                f"📄 Proof:\n{proof}",
-                parse_mode="HTML",
-                reply_markup=keyboard
+                f"📋 Task: {escape(str(title))}\n"
+                f"💰 Reward: ৳{reward:.2f}"
             )
+
+            # PHOTO PROOF
+            if isinstance(proof, str) and proof.startswith("PHOTO:"):
+
+                file_id = proof.replace("PHOTO:", "", 1)
+
+                try:
+                    await context.bot.send_photo(
+                        chat_id=ADMIN_ID,
+                        photo=file_id,
+                        caption=caption,
+                        parse_mode="HTML",
+                        reply_markup=proof_buttons(submission_id)
+                    )
+                except Exception:
+                    await context.bot.send_message(
+                        ADMIN_ID,
+                        caption + "\n\n"
+                        "⚠️ Screenshot load করা যায়নি।",
+                        parse_mode="HTML",
+                        reply_markup=proof_buttons(submission_id)
+                    )
+
+            # TEXT PROOF
+            else:
+
+                await query.message.reply_text(
+                    caption +
+                    f"\n\n📄 <b>Proof:</b>\n{escape(str(proof))}",
+                    parse_mode="HTML",
+                    reply_markup=proof_buttons(submission_id)
+                )
 
     # =========================
     # APPROVE PROOF
@@ -766,8 +800,8 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"💸 <b>Withdrawal #{withdrawal_id}</b>\n\n"
                 f"👤 User: <code>{uid}</code>\n"
                 f"💰 Amount: ৳{amount:.2f}\n"
-                f"📱 Method: {method}\n"
-                f"☎️ Number: <code>{number}</code>",
+                f"📱 Method: {escape(str(method))}\n"
+                f"☎️ Number: <code>{escape(str(number))}</code>",
                 parse_mode="HTML",
                 reply_markup=keyboard
             )
@@ -893,6 +927,123 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.message.reply_text(
             "❌ Withdrawal rejected এবং balance ফেরত দেওয়া হয়েছে।"
         )
+
+
+async def save_proof(update, context, proof):
+
+    user = update.effective_user
+
+    if "proof_task" not in context.user_data:
+        return False
+
+    task_id = context.user_data["proof_task"]
+
+    con = db()
+    cur = con.cursor()
+
+    try:
+
+        cur.execute("""
+            INSERT INTO submissions
+            (user_id, task_id, proof)
+            VALUES (?, ?, ?)
+        """, (
+            user.id,
+            task_id,
+            proof
+        ))
+
+        submission_id = cur.lastrowid
+        con.commit()
+
+    except sqlite3.IntegrityError:
+
+        con.close()
+        context.user_data.clear()
+
+        await update.message.reply_text(
+            "⚠️ এই Task-এর proof আগে জমা দিয়েছেন।",
+            reply_markup=user_menu()
+        )
+
+        return True
+
+    cur.execute("""
+        SELECT title, reward
+        FROM tasks
+        WHERE id=?
+    """, (task_id,))
+
+    task = cur.fetchone()
+
+    con.close()
+
+    title = task[0] if task else "Unknown Task"
+    reward = task[1] if task else 0
+
+    await update.message.reply_text(
+        "✅ <b>Proof জমা হয়েছে!</b>\n\n"
+        "📝 Admin screenshot দেখে verification করবেন।\n"
+        "⏳ Approve হলে reward আপনার balance-এ যোগ হবে।",
+        parse_mode="HTML",
+        reply_markup=user_menu()
+    )
+
+    caption = (
+        f"📝 <b>New Task Proof</b>\n\n"
+        f"🆔 Proof: #{submission_id}\n"
+        f"👤 User: <code>{user.id}</code>\n"
+        f"📋 Task: {escape(str(title))}\n"
+        f"💰 Reward: ৳{reward:.2f}"
+    )
+
+    # PHOTO PROOF
+    if proof.startswith("PHOTO:"):
+
+        file_id = proof.replace("PHOTO:", "", 1)
+
+        await context.bot.send_photo(
+            chat_id=ADMIN_ID,
+            photo=file_id,
+            caption=caption,
+            parse_mode="HTML",
+            reply_markup=proof_buttons(submission_id)
+        )
+
+    # TEXT PROOF
+    else:
+
+        await context.bot.send_message(
+            ADMIN_ID,
+            caption +
+            f"\n\n📄 <b>Proof:</b>\n{escape(str(proof))}",
+            parse_mode="HTML",
+            reply_markup=proof_buttons(submission_id)
+        )
+
+    context.user_data.clear()
+
+    return True
+
+
+async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
+    if "proof_task" not in context.user_data:
+        await update.message.reply_text(
+            "🏠 আগে একটি Task নির্বাচন করুন।",
+            reply_markup=user_menu()
+        )
+        return
+
+    photo = update.message.photo[-1]
+
+    file_id = photo.file_id
+
+    await save_proof(
+        update,
+        context,
+        f"PHOTO:{file_id}"
+    )
 
 
 async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1030,7 +1181,7 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "✅ <b>Withdrawal Request Submitted!</b>\n\n"
             f"💰 Amount: ৳{amount:.2f}\n"
             f"📱 Method: {method}\n"
-            f"☎️ Number: {number}\n\n"
+            f"☎️ Number: {escape(number)}\n\n"
             "⏳ Admin verification-এর জন্য অপেক্ষা করুন।",
             parse_mode="HTML",
             reply_markup=user_menu()
@@ -1051,8 +1202,8 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"🆔 Request: #{withdrawal_id}\n"
             f"👤 User: <code>{user.id}</code>\n"
             f"💰 Amount: ৳{amount:.2f}\n"
-            f"📱 Method: {method}\n"
-            f"☎️ Number: <code>{number}</code>",
+            f"📱 Method: {escape(method)}\n"
+            f"☎️ Number: <code>{escape(number)}</code>",
             parse_mode="HTML",
             reply_markup=keyboard
         )
@@ -1062,77 +1213,16 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     # =========================
-    # PROOF
+    # TEXT PROOF
     # =========================
 
     if "proof_task" in context.user_data:
 
-        task_id = context.user_data["proof_task"]
-
-        con = db()
-        cur = con.cursor()
-
-        try:
-
-            cur.execute("""
-                INSERT INTO submissions
-                (user_id, task_id, proof)
-                VALUES (?, ?, ?)
-            """, (
-                user.id,
-                task_id,
-                text
-            ))
-
-            con.commit()
-
-        except sqlite3.IntegrityError:
-
-            con.close()
-            context.user_data.clear()
-
-            await update.message.reply_text(
-                "⚠️ এই Task-এর proof আগে জমা দিয়েছেন।",
-                reply_markup=user_menu()
-            )
-
-            return
-
-        cur.execute("""
-            SELECT title, reward
-            FROM tasks
-            WHERE id=?
-        """, (task_id,))
-
-        task = cur.fetchone()
-
-        con.close()
-
-        await update.message.reply_text(
-            "✅ Proof জমা হয়েছে!\n\n"
-            "📝 Admin verification-এর পর reward যোগ হবে।",
-            reply_markup=user_menu()
+        await save_proof(
+            update,
+            context,
+            text
         )
-
-        await context.bot.send_message(
-            ADMIN_ID,
-            f"📝 <b>New Task Proof</b>\n\n"
-            f"👤 User: <code>{user.id}</code>\n"
-            f"📋 Task ID: {task_id}\n"
-            f"💰 Reward: ৳{task[1] if task else 0}\n\n"
-            f"📄 Proof:\n{text}",
-            parse_mode="HTML",
-            reply_markup=InlineKeyboardMarkup([
-                [
-                    InlineKeyboardButton(
-                        "📝 Proof দেখুন",
-                        callback_data="admin_proofs"
-                    )
-                ]
-            ])
-        )
-
-        context.user_data.clear()
 
         return
 
@@ -1232,13 +1322,11 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 def main():
 
     if not BOT_TOKEN:
-
         raise RuntimeError(
             "BOT_TOKEN সেট করা হয়নি।"
         )
 
     if not ADMIN_ID:
-
         raise RuntimeError(
             "ADMIN_ID সেট করা হয়নি।"
         )
@@ -1255,6 +1343,15 @@ def main():
         CallbackQueryHandler(button_handler)
     )
 
+    # PHOTO / SCREENSHOT PROOF
+    app.add_handler(
+        MessageHandler(
+            filters.PHOTO,
+            photo_handler
+        )
+    )
+
+    # TEXT
     app.add_handler(
         MessageHandler(
             filters.TEXT & ~filters.COMMAND,
