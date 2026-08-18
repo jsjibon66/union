@@ -26,7 +26,6 @@ from telegram.ext import (
     filters,
 )
 
-
 # =========================================================
 # CONFIG
 # =========================================================
@@ -39,26 +38,28 @@ MAX_WITHDRAW = 5000
 
 REFERRAL_REWARD = 5.0
 
-# নতুন Ad Reward
+# Rewarded Ad
 AD_REWARD = 0.20
-
-# Ad Zone
 AD_ZONE = "11601818"
+
+# একই User খুব দ্রুত বারবার Ad claim করতে পারবে না
+AD_COOLDOWN_SECONDS = 30
 
 SUPPORT_USERNAME = "Hasanroy53"
 UPDATE_CHANNEL = "https://t.me/MicroJobBD1"
 
 DB_NAME = "bot.db"
 
-# Render/Railway/VPS থেকে এই URL Environment Variable-এ দিতে হবে
-# উদাহরণ:
+# IMPORTANT:
+# Render/Railway/VPS-এর public HTTPS URL এখানে
+# Environment Variable হিসেবে WEB_APP_URL-এ দিতে হবে।
+#
+# Example:
 # https://your-app.onrender.com
+#
 WEB_APP_URL = os.getenv("WEB_APP_URL", "").rstrip("/")
 
 PORT = int(os.getenv("PORT", "8080"))
-
-# একই User খুব দ্রুত বারবার Ad claim করতে পারবে না
-AD_COOLDOWN_SECONDS = 30
 
 
 # =========================================================
@@ -73,7 +74,10 @@ web = Flask(__name__)
 # =========================================================
 
 def db():
-    con = sqlite3.connect(DB_NAME, timeout=30)
+    con = sqlite3.connect(
+        DB_NAME,
+        timeout=30
+    )
     con.execute("PRAGMA foreign_keys = ON")
     return con
 
@@ -143,7 +147,6 @@ def setup_database():
         )
     """)
 
-    # নতুন Ad Claims Table
     cur.execute("""
         CREATE TABLE IF NOT EXISTS ad_claims (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -153,12 +156,13 @@ def setup_database():
         )
     """)
 
-    # ---------------------------------------------------------
+    # =====================================================
     # OLD DATABASE MIGRATION
-    # ---------------------------------------------------------
+    # =====================================================
 
     user_cols = {
-        x[1] for x in cur.execute(
+        x[1]
+        for x in cur.execute(
             "PRAGMA table_info(users)"
         ).fetchall()
     }
@@ -179,7 +183,8 @@ def setup_database():
         )
 
     task_cols = {
-        x[1] for x in cur.execute(
+        x[1]
+        for x in cur.execute(
             "PRAGMA table_info(tasks)"
         ).fetchall()
     }
@@ -215,10 +220,15 @@ def add_user(user, referrer_id=None):
     con = db()
     cur = con.cursor()
 
-    # User নতুন হলে Referral সংরক্ষণ
     cur.execute("""
         INSERT OR IGNORE INTO users
-        (user_id, name, username, balance, referred_by)
+        (
+            user_id,
+            name,
+            username,
+            balance,
+            referred_by
+        )
         VALUES (?, ?, ?, 0, ?)
     """, (
         user.id,
@@ -227,10 +237,11 @@ def add_user(user, referrer_id=None):
         referrer_id
     ))
 
-    # পুরোনো User-এর profile update
     cur.execute("""
         UPDATE users
-        SET name=?, username=?
+        SET
+            name=?,
+            username=?
         WHERE user_id=?
     """, (
         user.first_name or "",
@@ -256,36 +267,7 @@ def get_balance(user_id):
 
     con.close()
 
-    return float(row[0]) if row else 0
-
-
-def add_balance(user_id, amount, kind, note):
-
-    con = db()
-    cur = con.cursor()
-
-    cur.execute("""
-        UPDATE users
-        SET balance=balance+?
-        WHERE user_id=?
-    """, (
-        amount,
-        user_id
-    ))
-
-    cur.execute("""
-        INSERT INTO transactions
-        (user_id, amount, kind, note)
-        VALUES (?, ?, ?, ?)
-    """, (
-        user_id,
-        amount,
-        kind,
-        note
-    ))
-
-    con.commit()
-    con.close()
+    return float(row[0]) if row else 0.0
 
 
 def remove_balance(user_id, amount):
@@ -296,7 +278,8 @@ def remove_balance(user_id, amount):
     cur.execute("""
         UPDATE users
         SET balance=balance-?
-        WHERE user_id=? AND balance>=?
+        WHERE user_id=?
+        AND balance>=?
     """, (
         amount,
         user_id,
@@ -333,7 +316,7 @@ def task_completed_count(task_id):
 
 
 # =========================================================
-# TELEGRAM WEB APP INITDATA VALIDATION
+# TELEGRAM WEB APP INIT DATA VALIDATION
 # =========================================================
 
 def validate_telegram_init_data(init_data):
@@ -350,14 +333,19 @@ def validate_telegram_init_data(init_data):
 
         data = dict(parsed)
 
-        received_hash = data.pop("hash", None)
+        received_hash = data.pop(
+            "hash",
+            None
+        )
 
         if not received_hash:
             return None
 
         data_check_string = "\n".join(
             f"{key}={value}"
-            for key, value in sorted(data.items())
+            for key, value in sorted(
+                data.items()
+            )
         )
 
         secret_key = hmac.new(
@@ -378,11 +366,16 @@ def validate_telegram_init_data(init_data):
         ):
             return None
 
-        # init_data-এর auth_date যাচাই
-        auth_date = int(data.get("auth_date", "0"))
+        auth_date = int(
+            data.get(
+                "auth_date",
+                "0"
+            )
+        )
 
-        # 24 ঘণ্টার বেশি পুরোনো হলে reject
-        if abs(time.time() - auth_date) > 86400:
+        if abs(
+            time.time() - auth_date
+        ) > 86400:
             return None
 
         user_json = data.get("user")
@@ -390,11 +383,19 @@ def validate_telegram_init_data(init_data):
         if not user_json:
             return None
 
-        user_data = json.loads(user_json)
+        user_data = json.loads(
+            user_json
+        )
 
         return user_data
 
-    except Exception:
+    except Exception as e:
+
+        print(
+            "InitData validation error:",
+            e
+        )
+
         return None
 
 
@@ -402,54 +403,16 @@ def validate_telegram_init_data(init_data):
 # AD CLAIM
 # =========================================================
 
-def can_claim_ad(user_id):
-
-    con = db()
-    cur = con.cursor()
-
-    cur.execute("""
-        SELECT created_at
-        FROM ad_claims
-        WHERE user_id=?
-        ORDER BY id DESC
-        LIMIT 1
-    """, (
-        user_id,
-    ))
-
-    row = cur.fetchone()
-
-    con.close()
-
-    if not row:
-        return True
-
-    try:
-        last_time = time.mktime(
-            time.strptime(
-                row[0],
-                "%Y-%m-%d %H:%M:%S"
-            )
-        )
-
-        return (
-            time.time() - last_time
-            >= AD_COOLDOWN_SECONDS
-        )
-
-    except Exception:
-        return True
-
-
 def claim_ad_reward(user_id):
 
     con = db()
     cur = con.cursor()
 
-    # Transaction + claim একসাথে
     try:
 
-        cur.execute("BEGIN IMMEDIATE")
+        cur.execute(
+            "BEGIN IMMEDIATE"
+        )
 
         cur.execute("""
             SELECT created_at
@@ -466,6 +429,7 @@ def claim_ad_reward(user_id):
         if row:
 
             try:
+
                 last_time = time.mktime(
                     time.strptime(
                         row[0],
@@ -474,16 +438,36 @@ def claim_ad_reward(user_id):
                 )
 
                 if (
-                    time.time() - last_time
+                    time.time()
+                    - last_time
                     < AD_COOLDOWN_SECONDS
                 ):
+
                     con.rollback()
                     con.close()
 
-                    return False, "cooldown"
+                    return (
+                        False,
+                        "cooldown"
+                    )
 
             except Exception:
                 pass
+
+        cur.execute(
+            "SELECT user_id FROM users WHERE user_id=?",
+            (user_id,)
+        )
+
+        if not cur.fetchone():
+
+            con.rollback()
+            con.close()
+
+            return (
+                False,
+                "user"
+            )
 
         cur.execute("""
             UPDATE users
@@ -494,16 +478,12 @@ def claim_ad_reward(user_id):
             user_id
         ))
 
-        if cur.rowcount != 1:
-
-            con.rollback()
-            con.close()
-
-            return False, "user"
-
         cur.execute("""
             INSERT INTO ad_claims
-            (user_id, reward)
+            (
+                user_id,
+                reward
+            )
             VALUES (?, ?)
         """, (
             user_id,
@@ -512,7 +492,12 @@ def claim_ad_reward(user_id):
 
         cur.execute("""
             INSERT INTO transactions
-            (user_id, amount, kind, note)
+            (
+                user_id,
+                amount,
+                kind,
+                note
+            )
             VALUES (?, ?, ?, ?)
         """, (
             user_id,
@@ -524,18 +509,29 @@ def claim_ad_reward(user_id):
         con.commit()
         con.close()
 
-        return True, "success"
+        return (
+            True,
+            "success"
+        )
 
-    except Exception:
+    except Exception as e:
+
+        print(
+            "Claim ad reward error:",
+            e
+        )
 
         try:
             con.rollback()
-        except:
+        except Exception:
             pass
 
         con.close()
 
-        return False, "error"
+        return (
+            False,
+            "error"
+        )
 
 
 # =========================================================
@@ -548,21 +544,30 @@ def web_home():
     return Response(
         """
 <!DOCTYPE html>
+
 <html lang="bn">
+
 <head>
 
 <meta charset="UTF-8">
-<meta name="viewport"
-      content="width=device-width, initial-scale=1.0">
 
-<title>Micro Job BD - Reward Ad</title>
+<meta
+    name="viewport"
+    content="width=device-width, initial-scale=1.0"
+>
 
-<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<title>
+    Micro Job BD - Reward Ad
+</title>
 
 <script
- src="//libtl.com/sdk.js"
- data-zone="11601818"
- data-sdk="show_11601818">
+    src="https://telegram.org/js/telegram-web-app.js">
+</script>
+
+<script
+    src="//libtl.com/sdk.js"
+    data-zone="11601818"
+    data-sdk="show_11601818">
 </script>
 
 <style>
@@ -572,9 +577,13 @@ def web_home():
 }
 
 body {
+
     margin: 0;
+
     padding: 20px;
+
     min-height: 100vh;
+
     font-family:
         Arial,
         sans-serif;
@@ -589,20 +598,34 @@ body {
     color: white;
 
     display: flex;
+
     align-items: center;
+
     justify-content: center;
 }
 
 .card {
+
     width: 100%;
+
     max-width: 430px;
 
     background:
-        rgba(255,255,255,0.08);
+        rgba(
+            255,
+            255,
+            255,
+            0.08
+        );
 
     border:
         1px solid
-        rgba(255,255,255,0.15);
+        rgba(
+            255,
+            255,
+            255,
+            0.15
+        );
 
     border-radius: 25px;
 
@@ -614,34 +637,49 @@ body {
 
     box-shadow:
         0 20px 60px
-        rgba(0,0,0,0.35);
+        rgba(
+            0,
+            0,
+            0,
+            0.35
+        );
 }
 
 .logo {
+
     font-size: 55px;
+
     margin-bottom: 10px;
 }
 
 h1 {
-    margin: 0 0 10px;
+
+    margin:
+        0 0 10px;
+
     font-size: 27px;
 }
 
 .subtitle {
+
     opacity: 0.8;
+
     line-height: 1.6;
 }
 
 .reward {
+
     margin: 25px 0;
 
     font-size: 42px;
+
     font-weight: bold;
 
     color: #ffd166;
 }
 
 button {
+
     width: 100%;
 
     border: 0;
@@ -651,6 +689,7 @@ button {
     padding: 17px;
 
     font-size: 18px;
+
     font-weight: bold;
 
     cursor: pointer;
@@ -666,14 +705,21 @@ button {
 
     box-shadow:
         0 10px 25px
-        rgba(34,197,94,0.25);
+        rgba(
+            34,
+            197,
+            94,
+            0.25
+        );
 }
 
 button:disabled {
+
     opacity: 0.5;
 }
 
 .status {
+
     min-height: 25px;
 
     margin-top: 20px;
@@ -682,6 +728,7 @@ button:disabled {
 }
 
 .balance {
+
     margin-top: 15px;
 
     padding: 13px;
@@ -689,10 +736,16 @@ button:disabled {
     border-radius: 12px;
 
     background:
-        rgba(255,255,255,0.08);
+        rgba(
+            255,
+            255,
+            255,
+            0.08
+        );
 }
 
 .small {
+
     margin-top: 20px;
 
     font-size: 13px;
@@ -710,14 +763,20 @@ button:disabled {
 
 <div class="card">
 
-    <div class="logo">🎁</div>
+    <div class="logo">
+        🎁
+    </div>
 
-    <h1>Rewarded Ad</h1>
+    <h1>
+        Rewarded Ad
+    </h1>
 
     <div class="subtitle">
+
         সম্পূর্ণ বিজ্ঞাপন দেখুন এবং
         আপনার Micro Job BD Balance-এ
         Reward পান।
+
     </div>
 
     <div class="reward">
@@ -726,23 +785,28 @@ button:disabled {
 
     <button
         id="watchBtn"
-        onclick="watchAd()">
-
+        onclick="watchAd()"
+    >
         🎬 বিজ্ঞাপন দেখুন
     </button>
 
     <div
         id="status"
-        class="status">
-    </div>
+        class="status"
+    ></div>
 
     <div class="balance">
-        💰 Reward: <b>৳0.20</b>
+
+        💰 Reward:
+        <b>৳0.20</b>
+
     </div>
 
     <div class="small">
+
         বিজ্ঞাপন সম্পূর্ণভাবে চালু হওয়ার পর
         Reward claim করা হবে।
+
     </div>
 
 </div>
@@ -754,16 +818,21 @@ const tg =
     window.Telegram.WebApp;
 
 tg.ready();
+
 tg.expand();
 
 
 async function watchAd() {
 
     const btn =
-        document.getElementById("watchBtn");
+        document.getElementById(
+            "watchBtn"
+        );
 
     const status =
-        document.getElementById("status");
+        document.getElementById(
+            "status"
+        );
 
     btn.disabled = true;
 
@@ -780,29 +849,34 @@ async function watchAd() {
             throw new Error(
                 "Ad SDK পাওয়া যায়নি"
             );
-
         }
 
         /*
          * Rewarded Popup
          *
-         * User ad শেষ করলে Promise resolve
+         * Ad network-এর Promise
+         * complete হলে নিচের code চলবে।
          */
-        await show_11601818("pop");
+
+        await show_11601818(
+            "end"
+        );
 
         status.innerHTML =
             "⏳ Reward যাচাই করা হচ্ছে...";
 
+
         const initData =
             tg.initData;
+
 
         if (!initData) {
 
             throw new Error(
                 "Telegram user data পাওয়া যায়নি"
             );
-
         }
+
 
         const response =
             await fetch(
@@ -822,56 +896,100 @@ async function watchAd() {
                 }
             );
 
+
         const result =
             await response.json();
 
-        if (result.success) {
+
+        if (
+            result.success
+        ) {
 
             status.innerHTML =
                 "🎉 সফল! ৳0.20 আপনার Balance-এ যোগ হয়েছে।";
 
-            tg.HapticFeedback
-              .notificationOccurred(
-                  "success"
-              );
+            try {
 
-            setTimeout(() => {
+                if (
+                    tg.HapticFeedback
+                ) {
 
-                tg.close();
+                    tg.HapticFeedback
+                        .notificationOccurred(
+                            "success"
+                        );
+                }
 
-            }, 1800);
+            } catch (
+                hapticError
+            ) {}
 
-        } else if (
-            result.reason === "cooldown"
+            setTimeout(
+                () => {
+
+                    tg.close();
+
+                },
+                1800
+            );
+
+        }
+
+        else if (
+            result.reason ===
+            "cooldown"
         ) {
 
             status.innerHTML =
                 "⏳ একটু অপেক্ষা করুন। তারপর আবার Ad দেখতে পারবেন।";
 
-            btn.disabled = false;
+            btn.disabled =
+                false;
 
-        } else {
+        }
+
+        else if (
+            result.reason ===
+            "invalid_user"
+        ) {
+
+            status.innerHTML =
+                "❌ Telegram User যাচাই করা যায়নি। Mini App আবার খুলুন।";
+
+            btn.disabled =
+                false;
+
+        }
+
+        else {
 
             status.innerHTML =
                 "❌ Reward দেওয়া যায়নি। আবার চেষ্টা করুন।";
 
-            btn.disabled = false;
+            btn.disabled =
+                false;
         }
 
-    } catch (error) {
+    }
 
-        console.error(error);
+    catch (error) {
+
+        console.error(
+            error
+        );
 
         status.innerHTML =
             "❌ বিজ্ঞাপন সম্পূর্ণ করা যায়নি।";
 
-        btn.disabled = false;
+        btn.disabled =
+            false;
     }
 }
 
 </script>
 
 </body>
+
 </html>
         """,
         mimetype="text/html"
@@ -882,7 +1000,10 @@ async function watchAd() {
 # AD REWARD API
 # =========================================================
 
-@web.route("/api/ad-reward", methods=["POST"])
+@web.route(
+    "/api/ad-reward",
+    methods=["POST"]
+)
 def ad_reward_api():
 
     try:
@@ -896,8 +1017,10 @@ def ad_reward_api():
             ""
         )
 
-        user_data = validate_telegram_init_data(
-            init_data
+        user_data = (
+            validate_telegram_init_data(
+                init_data
+            )
         )
 
         if not user_data:
@@ -911,7 +1034,6 @@ def ad_reward_api():
             user_data["id"]
         )
 
-        # User database-এ আছে কিনা
         con = db()
         cur = con.cursor()
 
@@ -931,8 +1053,10 @@ def ad_reward_api():
                 "reason": "user_not_found"
             }), 404
 
-        success, reason = claim_ad_reward(
-            user_id
+        success, reason = (
+            claim_ad_reward(
+                user_id
+            )
         )
 
         if success:
@@ -972,52 +1096,63 @@ def ad_reward_api():
 def user_menu():
 
     buttons = [
+
         [
             InlineKeyboardButton(
                 "📋 কাজ করুন",
                 callback_data="tasks"
             ),
+
             InlineKeyboardButton(
                 "💰 ব্যালেন্স",
                 callback_data="balance"
             )
         ],
+
         [
             InlineKeyboardButton(
                 "🎁 Ad দেখে ৳0.20",
                 web_app=WebAppInfo(
-                    url=WEB_APP_URL
-                    if WEB_APP_URL
-                    else "https://example.com"
+                    url=(
+                        WEB_APP_URL
+                        if WEB_APP_URL
+                        else "https://example.com"
+                    )
                 )
             )
         ],
+
         [
             InlineKeyboardButton(
                 "💸 টাকা তুলুন",
                 callback_data="withdraw"
             ),
+
             InlineKeyboardButton(
                 "📜 ইতিহাস",
                 callback_data="history"
             )
         ],
+
         [
             InlineKeyboardButton(
                 "👥 রেফার করুন",
                 callback_data="referral"
             ),
+
             InlineKeyboardButton(
                 "🎧 সাপোর্ট",
                 callback_data="support"
             )
         ],
+
         [
             InlineKeyboardButton(
                 "📢 Bot Update / Challenge",
                 url=UPDATE_CHANNEL
             )
         ],
+
         [
             InlineKeyboardButton(
                 "🏠 Start / Home",
@@ -1026,7 +1161,9 @@ def user_menu():
         ]
     ]
 
-    return InlineKeyboardMarkup(buttons)
+    return InlineKeyboardMarkup(
+        buttons
+    )
 
 
 # =========================================================
@@ -1036,48 +1173,57 @@ def user_menu():
 def admin_menu():
 
     return InlineKeyboardMarkup([
+
         [
             InlineKeyboardButton(
                 "➕ নতুন Task",
                 callback_data="admin_new_task"
             ),
+
             InlineKeyboardButton(
                 "📋 Tasks",
                 callback_data="admin_tasks"
             )
         ],
+
         [
             InlineKeyboardButton(
                 "📝 Proof",
                 callback_data="admin_proofs"
             ),
+
             InlineKeyboardButton(
                 "💸 Withdrawals",
                 callback_data="admin_withdrawals"
             )
         ],
+
         [
             InlineKeyboardButton(
                 "👥 Users",
                 callback_data="admin_users"
             ),
+
             InlineKeyboardButton(
                 "📊 Statistics",
                 callback_data="admin_stats"
             )
         ],
+
         [
             InlineKeyboardButton(
                 "📢 Broadcast",
                 callback_data="admin_broadcast"
             )
         ],
+
         [
             InlineKeyboardButton(
                 "🏠 Admin Home",
                 callback_data="admin_home"
             )
         ]
+
     ])
 
 
@@ -1101,6 +1247,7 @@ async def start(
         if arg.startswith("ref_"):
 
             try:
+
                 referrer_id = int(
                     arg.replace(
                         "ref_",
@@ -1108,7 +1255,8 @@ async def start(
                     )
                 )
 
-            except:
+            except Exception:
+
                 referrer_id = None
 
     if referrer_id == user.id:
@@ -1119,8 +1267,7 @@ async def start(
         referrer_id
     )
 
-    # নতুন referral reward
-    # নতুন User হলে এবং valid referrer থাকলে
+    # Referral reward
     if referrer_id:
 
         con = db()
@@ -1138,8 +1285,10 @@ async def start(
 
         current = cur.fetchone()
 
-        # referral_reward_paid=0 এবং referrer user আছে
-        if current and current[1] == 0:
+        if (
+            current
+            and current[1] == 0
+        ):
 
             cur.execute(
                 "SELECT user_id FROM users WHERE user_id=?",
@@ -1161,7 +1310,12 @@ async def start(
 
                 cur.execute("""
                     INSERT INTO transactions
-                    (user_id, amount, kind, note)
+                    (
+                        user_id,
+                        amount,
+                        kind,
+                        note
+                    )
                     VALUES (?, ?, ?, ?)
                 """, (
                     referrer_id,
@@ -1184,12 +1338,15 @@ async def start(
 
                     await context.bot.send_message(
                         referrer_id,
+
                         "🎉 <b>New Referral!</b>\n\n"
-                        f"💰 আপনি {money(REFERRAL_REWARD)} Referral Reward পেয়েছেন।",
+                        f"💰 আপনি {money(REFERRAL_REWARD)} "
+                        "Referral Reward পেয়েছেন।",
+
                         parse_mode="HTML"
                     )
 
-                except:
+                except Exception:
                     pass
 
         con.close()
@@ -1199,9 +1356,11 @@ async def start(
     if user.id == ADMIN_ID:
 
         await update.message.reply_text(
+
             "👑 <b>ADMIN PANEL</b>\n\n"
             "স্বাগতম Admin!\n\n"
             "নিচের মেনু থেকে কাজ করুন।",
+
             parse_mode="HTML",
             reply_markup=admin_menu()
         )
@@ -1209,14 +1368,21 @@ async def start(
     else:
 
         await update.message.reply_text(
+
             "🎉 <b>স্বাগতম Micro Job BD!</b>\n\n"
+
             "📋 কাজ করুন\n"
             "💰 Reward উপার্জন করুন\n"
             "🎁 Ad দেখে প্রতি বার ৳0.20 Reward নিন\n"
+
             "👥 বন্ধু রেফার করে প্রতি সফল Referral-এ "
             f"{money(REFERRAL_REWARD)} পান\n"
-            f"💸 Minimum withdrawal: {money(MIN_WITHDRAW)}\n\n"
+
+            f"💸 Minimum withdrawal: "
+            f"{money(MIN_WITHDRAW)}\n\n"
+
             "নিচের মেনু থেকে শুরু করুন 👇",
+
             parse_mode="HTML",
             reply_markup=user_menu()
         )
@@ -1236,7 +1402,9 @@ async def button_handler(
     await query.answer()
 
     user_id = query.from_user.id
+
     data = query.data
+
 
     # =====================================================
     # HOME
@@ -1257,11 +1425,13 @@ async def button_handler(
             await query.message.reply_text(
                 "🏠 <b>Micro Job BD</b>\n\n"
                 "আপনার মেনু থেকে একটি অপশন নির্বাচন করুন 👇",
+
                 parse_mode="HTML",
                 reply_markup=user_menu()
             )
 
         return
+
 
     # =====================================================
     # ADMIN HOME
@@ -1280,6 +1450,7 @@ async def button_handler(
 
         return
 
+
     # =====================================================
     # BALANCE
     # =====================================================
@@ -1291,13 +1462,16 @@ async def button_handler(
         )
 
         await query.message.reply_text(
+
             f"💰 <b>আপনার Balance</b>\n\n"
             f"💵 {money(balance)}",
+
             parse_mode="HTML",
             reply_markup=user_menu()
         )
 
         return
+
 
     # =====================================================
     # TASKS
@@ -1338,8 +1512,10 @@ async def button_handler(
                 max_users
             ) = task
 
-            done_count = task_completed_count(
-                task_id
+            done_count = (
+                task_completed_count(
+                    task_id
+                )
             )
 
             if (
@@ -1387,12 +1563,15 @@ async def button_handler(
 
             if max_users == 0:
 
-                limit_text = "♾️ Unlimited"
+                limit_text = (
+                    "♾️ Unlimited"
+                )
 
             else:
 
                 remaining = (
-                    max_users - done_count
+                    max_users
+                    - done_count
                 )
 
                 limit_text = (
@@ -1419,11 +1598,16 @@ async def button_handler(
             ])
 
             await query.message.reply_text(
+
                 f"📋 <b>{safe(title)}</b>\n\n"
+
                 f"📝 {safe(description)}\n\n"
+
                 f"💰 Reward: {money(reward)}\n"
                 f"{limit_text}",
+
                 parse_mode="HTML",
+
                 reply_markup=InlineKeyboardMarkup(
                     keyboard
                 )
@@ -1437,6 +1621,7 @@ async def button_handler(
             )
 
         return
+
 
     # =====================================================
     # SUBMIT PROOF
@@ -1452,9 +1637,12 @@ async def button_handler(
         cur = con.cursor()
 
         cur.execute("""
-            SELECT title, max_users
+            SELECT
+                title,
+                max_users
             FROM tasks
-            WHERE id=? AND active=1
+            WHERE id=?
+            AND active=1
         """, (
             task_id,
         ))
@@ -1475,14 +1663,16 @@ async def button_handler(
 
         if max_users > 0:
 
-            count = task_completed_count(
-                task_id
+            count = (
+                task_completed_count(
+                    task_id
+                )
             )
 
             if count >= max_users:
 
                 await query.message.reply_text(
-                    "❌ এই Task-এর limit পূর্ণ হয়ে গেছে।"
+                    "❌ এই Task-এর limit পূর্ণ হয়ে গেছে।"
                 )
 
                 return
@@ -1492,13 +1682,18 @@ async def button_handler(
         ] = task_id
 
         await query.message.reply_text(
+
             "📸 <b>Proof জমা দিন</b>\n\n"
+
             "Task শেষ করে Screenshot/Photo পাঠান।\n\n"
+
             "📌 ছবির সাথে চাইলে Caption-ও দিতে পারেন।",
+
             parse_mode="HTML"
         )
 
         return
+
 
     # =====================================================
     # WITHDRAW
@@ -1513,9 +1708,15 @@ async def button_handler(
         if balance < MIN_WITHDRAW:
 
             await query.message.reply_text(
-                f"❌ Balance যথেষ্ট নয়।\n\n"
-                f"💰 আপনার Balance: {money(balance)}\n"
-                f"📌 Minimum: {money(MIN_WITHDRAW)}",
+
+                "❌ Balance যথেষ্ট নয়।\n\n"
+
+                f"💰 আপনার Balance: "
+                f"{money(balance)}\n"
+
+                f"📌 Minimum: "
+                f"{money(MIN_WITHDRAW)}",
+
                 reply_markup=user_menu()
             )
 
@@ -1526,14 +1727,19 @@ async def button_handler(
         ] = "amount"
 
         await query.message.reply_text(
+
             "💸 <b>Withdrawal</b>\n\n"
+
             f"Minimum: {money(MIN_WITHDRAW)}\n"
             f"Maximum: {money(MAX_WITHDRAW)}\n\n"
+
             "কত টাকা তুলতে চান লিখুন।",
+
             parse_mode="HTML"
         )
 
         return
+
 
     # =====================================================
     # HISTORY
@@ -1545,7 +1751,10 @@ async def button_handler(
         cur = con.cursor()
 
         cur.execute("""
-            SELECT amount, kind, note
+            SELECT
+                amount,
+                kind,
+                note
             FROM transactions
             WHERE user_id=?
             ORDER BY id DESC
@@ -1570,7 +1779,11 @@ async def button_handler(
                 "📜 <b>Transaction History</b>\n\n"
             )
 
-            for amount, kind, note in rows:
+            for (
+                amount,
+                kind,
+                note
+            ) in rows:
 
                 text += (
                     f"💰 {money(amount)}\n"
@@ -1586,6 +1799,7 @@ async def button_handler(
 
         return
 
+
     # =====================================================
     # REFERRAL
     # =====================================================
@@ -1600,18 +1814,25 @@ async def button_handler(
         )
 
         await query.message.reply_text(
+
             "👥 <b>Referral Program</b>\n\n"
+
             f"🎁 প্রতি সফল Referral-এ "
             f"<b>{money(REFERRAL_REWARD)}</b> পাবেন।\n\n"
-            "বন্ধুকে আপনার Referral Link দিয়ে Bot-এ "
-            "Join করান।\n\n"
+
+            "বন্ধুকে আপনার Referral Link দিয়ে "
+            "Bot-এ Join করান।\n\n"
+
             "🔗 <b>Your Referral Link:</b>\n"
+
             f"<code>{link}</code>",
+
             parse_mode="HTML",
             reply_markup=user_menu()
         )
 
         return
+
 
     # =====================================================
     # SUPPORT
@@ -1620,11 +1841,18 @@ async def button_handler(
     if data == "support":
 
         await query.message.reply_text(
+
             "🎧 <b>Support</b>\n\n"
-            "কোনো সমস্যা হলে আমাদের Admin-এর সাথে যোগাযোগ করুন।\n\n"
+
+            "কোনো সমস্যা হলে আমাদের Admin-এর সাথে "
+            "যোগাযোগ করুন।\n\n"
+
             "👤 Admin: @Hasanroy53",
+
             parse_mode="HTML",
+
             reply_markup=InlineKeyboardMarkup([
+
                 [
                     InlineKeyboardButton(
                         "👤 Admin-কে Message করুন",
@@ -1634,16 +1862,19 @@ async def button_handler(
                         )
                     )
                 ],
+
                 [
                     InlineKeyboardButton(
                         "🏠 Home",
                         callback_data="home"
                     )
                 ]
+
             ])
         )
 
         return
+
 
     # =====================================================
     # ADMIN CHECK
@@ -1658,6 +1889,7 @@ async def button_handler(
         if user_id != ADMIN_ID:
             return
 
+
     # =====================================================
     # ADMIN STATISTICS
     # =====================================================
@@ -1670,6 +1902,7 @@ async def button_handler(
         cur.execute(
             "SELECT COUNT(*) FROM users"
         )
+
         users = cur.fetchone()[0]
 
         cur.execute("""
@@ -1677,11 +1910,13 @@ async def button_handler(
             FROM users
             WHERE referred_by IS NOT NULL
         """)
+
         referred = cur.fetchone()[0]
 
         cur.execute(
             "SELECT COUNT(*) FROM tasks"
         )
+
         tasks = cur.fetchone()[0]
 
         cur.execute("""
@@ -1689,6 +1924,7 @@ async def button_handler(
             FROM submissions
             WHERE status='pending'
         """)
+
         proofs = cur.fetchone()[0]
 
         cur.execute("""
@@ -1696,23 +1932,28 @@ async def button_handler(
             FROM withdrawals
             WHERE status='pending'
         """)
+
         withdrawals = cur.fetchone()[0]
 
         cur.execute(
             "SELECT COUNT(*) FROM ad_claims"
         )
+
         ads = cur.fetchone()[0]
 
         cur.execute("""
             SELECT COALESCE(SUM(reward), 0)
             FROM ad_claims
         """)
+
         ad_money = cur.fetchone()[0]
 
         con.close()
 
         await query.message.reply_text(
+
             "📊 <b>Statistics</b>\n\n"
+
             f"👥 Users: {users}\n"
             f"👥 Referred Users: {referred}\n"
             f"📋 Tasks: {tasks}\n"
@@ -1720,11 +1961,13 @@ async def button_handler(
             f"💸 Pending Withdrawal: {withdrawals}\n"
             f"🎬 Total Ad Views: {ads}\n"
             f"💰 Ad Rewards Paid: {money(ad_money)}",
+
             parse_mode="HTML",
             reply_markup=admin_menu()
         )
 
         return
+
 
     # =====================================================
     # ADMIN USERS
@@ -1759,7 +2002,9 @@ async def button_handler(
 
             return
 
-        text = "👥 <b>Users</b>\n\n"
+        text = (
+            "👥 <b>Users</b>\n\n"
+        )
 
         for (
             uid,
@@ -1788,6 +2033,7 @@ async def button_handler(
         )
 
         return
+
 
     # =====================================================
     # ADMIN TASKS
@@ -1822,7 +2068,9 @@ async def button_handler(
 
             return
 
-        text = "📋 <b>All Tasks</b>\n\n"
+        text = (
+            "📋 <b>All Tasks</b>\n\n"
+        )
 
         for (
             tid,
@@ -1832,8 +2080,10 @@ async def button_handler(
             active
         ) in rows:
 
-            used = task_completed_count(
-                tid
+            used = (
+                task_completed_count(
+                    tid
+                )
             )
 
             status = (
@@ -1863,6 +2113,7 @@ async def button_handler(
 
         return
 
+
     # =====================================================
     # NEW TASK
     # =====================================================
@@ -1876,12 +2127,16 @@ async def button_handler(
         ] = "title"
 
         await query.message.reply_text(
+
             "➕ <b>New Task</b>\n\n"
+
             "১️⃣ Task-এর নাম লিখুন।",
+
             parse_mode="HTML"
         )
 
         return
+
 
     # =====================================================
     # ADMIN PROOFS
@@ -1930,19 +2185,24 @@ async def button_handler(
         ) in rows:
 
             keyboard = InlineKeyboardMarkup([
+
                 [
                     InlineKeyboardButton(
                         "✅ Approve",
                         callback_data=f"approve_{sid}"
                     ),
+
                     InlineKeyboardButton(
                         "❌ Reject",
                         callback_data=f"reject_{sid}"
                     )
                 ]
+
             ])
 
-            if proof.startswith("PHOTO:"):
+            if proof.startswith(
+                "PHOTO:"
+            ):
 
                 file_id = (
                     proof
@@ -1952,41 +2212,64 @@ async def button_handler(
 
                 caption = (
                     proof
-                    .split("|CAPTION:", 1)[1]
+                    .split(
+                        "|CAPTION:",
+                        1
+                    )[1]
                 )
 
                 await context.bot.send_photo(
+
                     chat_id=ADMIN_ID,
+
                     photo=file_id,
+
                     caption=(
+
                         f"📝 Proof #{sid}\n\n"
+
                         f"👤 User: {uid}\n"
                         f"📋 {title}\n"
                         f"💰 Reward: {money(reward)}\n\n"
+
                         f"📄 Caption:\n{caption}"
                     ),
+
                     reply_markup=keyboard
                 )
 
             else:
 
                 await query.message.reply_text(
+
                     f"📝 <b>Proof #{sid}</b>\n\n"
-                    f"👤 User: <code>{uid}</code>\n"
-                    f"📋 Task: {safe(title)}\n"
-                    f"💰 Reward: {money(reward)}\n\n"
+
+                    f"👤 User: "
+                    f"<code>{uid}</code>\n"
+
+                    f"📋 Task: "
+                    f"{safe(title)}\n"
+
+                    f"💰 Reward: "
+                    f"{money(reward)}\n\n"
+
                     f"📄 {safe(proof)}",
+
                     parse_mode="HTML",
+
                     reply_markup=keyboard
                 )
 
         return
 
+
     # =====================================================
     # APPROVE PROOF
     # =====================================================
 
-    if data.startswith("approve_"):
+    if data.startswith(
+        "approve_"
+    ):
 
         sid = int(
             data.split("_")[1]
@@ -2042,7 +2325,12 @@ async def button_handler(
 
         cur.execute("""
             INSERT INTO transactions
-            (user_id, amount, kind, note)
+            (
+                user_id,
+                amount,
+                kind,
+                note
+            )
             VALUES (?, ?, ?, ?)
         """, (
             target_user,
@@ -2059,24 +2347,33 @@ async def button_handler(
         )
 
         await context.bot.send_message(
+
             target_user,
+
             "🎉 <b>Task Approved!</b>\n\n"
+
             f"💰 Reward: {money(reward)}\n"
-            f"💵 New Balance: {money(new_balance)}",
+
+            f"💵 New Balance: "
+            f"{money(new_balance)}",
+
             parse_mode="HTML"
         )
 
         await query.message.reply_text(
-            "✅ Proof Approved এবং Reward যোগ হয়েছে।"
+            "✅ Proof Approved এবং Reward যোগ হয়েছে।"
         )
 
         return
+
 
     # =====================================================
     # REJECT PROOF
     # =====================================================
 
-    if data.startswith("reject_"):
+    if data.startswith(
+        "reject_"
+    ):
 
         sid = int(
             data.split("_")[1]
@@ -2113,12 +2410,14 @@ async def button_handler(
             try:
 
                 await context.bot.send_message(
+
                     target_user,
-                    "❌ আপনার Task Proof Reject করা হয়েছে।\n\n"
+
+                    "❌ আপনার Task Proof Reject করা হয়েছে।\n\n"
                     "আবার সঠিক Proof জমা দিতে পারেন।"
                 )
 
-            except:
+            except Exception:
                 pass
 
         con.close()
@@ -2128,6 +2427,7 @@ async def button_handler(
         )
 
         return
+
 
     # =====================================================
     # ADMIN WITHDRAWALS
@@ -2172,35 +2472,52 @@ async def button_handler(
         ) in rows:
 
             keyboard = InlineKeyboardMarkup([
+
                 [
                     InlineKeyboardButton(
                         "✅ Approve",
                         callback_data=f"approve_w_{wid}"
                     ),
+
                     InlineKeyboardButton(
                         "❌ Reject",
                         callback_data=f"reject_w_{wid}"
                     )
                 ]
+
             ])
 
             await query.message.reply_text(
+
                 f"💸 <b>Withdrawal #{wid}</b>\n\n"
-                f"👤 User: <code>{uid}</code>\n"
-                f"💰 Amount: {money(amount)}\n"
-                f"📱 Method: {safe(method)}\n"
-                f"☎️ Number: <code>{safe(number)}</code>",
+
+                f"👤 User: "
+                f"<code>{uid}</code>\n"
+
+                f"💰 Amount: "
+                f"{money(amount)}\n"
+
+                f"📱 Method: "
+                f"{safe(method)}\n"
+
+                f"☎️ Number: "
+                f"<code>{safe(number)}</code>",
+
                 parse_mode="HTML",
+
                 reply_markup=keyboard
             )
 
         return
 
+
     # =====================================================
     # APPROVE WITHDRAWAL
     # =====================================================
 
-    if data.startswith("approve_w_"):
+    if data.startswith(
+        "approve_w_"
+    ):
 
         wid = int(
             data.split("_")[2]
@@ -2210,7 +2527,9 @@ async def button_handler(
         cur = con.cursor()
 
         cur.execute("""
-            SELECT user_id, amount
+            SELECT
+                user_id,
+                amount
             FROM withdrawals
             WHERE id=?
             AND status='pending'
@@ -2244,8 +2563,11 @@ async def button_handler(
         con.close()
 
         await context.bot.send_message(
+
             uid,
-            f"✅ আপনার {money(amount)} Withdrawal Approved হয়েছে।"
+
+            f"✅ আপনার {money(amount)} "
+            "Withdrawal Approved হয়েছে।"
         )
 
         await query.message.reply_text(
@@ -2254,11 +2576,14 @@ async def button_handler(
 
         return
 
+
     # =====================================================
     # REJECT WITHDRAWAL
     # =====================================================
 
-    if data.startswith("reject_w_"):
+    if data.startswith(
+        "reject_w_"
+    ):
 
         wid = int(
             data.split("_")[2]
@@ -2268,7 +2593,9 @@ async def button_handler(
         cur = con.cursor()
 
         cur.execute("""
-            SELECT user_id, amount
+            SELECT
+                user_id,
+                amount
             FROM withdrawals
             WHERE id=?
             AND status='pending'
@@ -2309,7 +2636,12 @@ async def button_handler(
 
         cur.execute("""
             INSERT INTO transactions
-            (user_id, amount, kind, note)
+            (
+                user_id,
+                amount,
+                kind,
+                note
+            )
             VALUES (?, ?, ?, ?)
         """, (
             uid,
@@ -2322,16 +2654,21 @@ async def button_handler(
         con.close()
 
         await context.bot.send_message(
+
             uid,
-            f"❌ Withdrawal Reject হয়েছে।\n\n"
-            f"💰 {money(amount)} আপনার Balance-এ ফেরত দেওয়া হয়েছে।"
+
+            f"❌ Withdrawal Reject হয়েছে।\n\n"
+
+            f"💰 {money(amount)} "
+            "আপনার Balance-এ ফেরত দেওয়া হয়েছে।"
         )
 
         await query.message.reply_text(
-            "❌ Withdrawal rejected এবং balance ফেরত দেওয়া হয়েছে।"
+            "❌ Withdrawal rejected এবং balance ফেরত দেওয়া হয়েছে।"
         )
 
         return
+
 
     # =====================================================
     # BROADCAST START
@@ -2346,8 +2683,12 @@ async def button_handler(
         ] = "broadcast"
 
         await query.message.reply_text(
+
             "📢 <b>Broadcast</b>\n\n"
-            "যে Message সব User-কে পাঠাতে চান সেটি লিখুন।",
+
+            "যে Message সব User-কে পাঠাতে চান "
+            "সেটি লিখুন।",
+
             parse_mode="HTML"
         )
 
@@ -2407,7 +2748,7 @@ async def photo_handler(
         context.user_data.clear()
 
         await update.message.reply_text(
-            "❌ Task পাওয়া যায়নি।"
+            "❌ Task পাওয়া যায়নি।"
         )
 
         return
@@ -2433,8 +2774,10 @@ async def photo_handler(
 
     if max_users > 0:
 
-        count = task_completed_count(
-            task_id
+        count = (
+            task_completed_count(
+                task_id
+            )
         )
 
         if count >= max_users:
@@ -2444,7 +2787,7 @@ async def photo_handler(
             context.user_data.clear()
 
             await update.message.reply_text(
-                "❌ এই Task-এর Limit পূর্ণ হয়ে গেছে।"
+                "❌ এই Task-এর Limit পূর্ণ হয়ে গেছে।"
             )
 
             return
@@ -2466,7 +2809,7 @@ async def photo_handler(
         context.user_data.clear()
 
         await update.message.reply_text(
-            "⚠️ এই Task-এর Proof আগে জমা দিয়েছেন।"
+            "⚠️ এই Task-এর Proof আগে জমা দিয়েছেন।"
         )
 
         return
@@ -2487,7 +2830,11 @@ async def photo_handler(
 
     cur.execute("""
         INSERT INTO submissions
-        (user_id, task_id, proof)
+        (
+            user_id,
+            task_id,
+            proof
+        )
         VALUES (?, ?, ?)
     """, (
         user.id,
@@ -2503,34 +2850,54 @@ async def photo_handler(
     context.user_data.clear()
 
     await update.message.reply_text(
-        "✅ <b>Screenshot জমা হয়েছে!</b>\n\n"
+
+        "✅ <b>Screenshot জমা হয়েছে!</b>\n\n"
+
         "⏳ Admin আপনার Proof দেখে Approve করবেন।",
+
         parse_mode="HTML",
         reply_markup=user_menu()
     )
 
     keyboard = InlineKeyboardMarkup([
+
         [
             InlineKeyboardButton(
                 "📝 Proof দেখুন",
                 callback_data="admin_proofs"
             )
         ]
+
     ])
 
     await context.bot.send_photo(
+
         chat_id=ADMIN_ID,
+
         photo=file_id,
+
         caption=(
+
             f"📝 <b>NEW PHOTO PROOF</b>\n\n"
+
             f"🆔 Proof #{submission_id}\n"
-            f"👤 User: <code>{user.id}</code>\n"
-            f"📋 Task: {safe(title)}\n"
-            f"💰 Reward: {money(reward)}\n\n"
+
+            f"👤 User: "
+            f"<code>{user.id}</code>\n"
+
+            f"📋 Task: "
+            f"{safe(title)}\n"
+
+            f"💰 Reward: "
+            f"{money(reward)}\n\n"
+
             f"📄 Caption:\n"
+
             f"{safe(caption) if caption else 'None'}"
         ),
+
         parse_mode="HTML",
+
         reply_markup=keyboard
     )
 
@@ -2552,6 +2919,7 @@ async def text_handler(
 
     add_user(user)
 
+
     # =====================================================
     # WITHDRAW AMOUNT
     # =====================================================
@@ -2564,9 +2932,10 @@ async def text_handler(
     ):
 
         try:
+
             amount = float(text)
 
-        except:
+        except Exception:
 
             await update.message.reply_text(
                 "❌ সঠিক Amount লিখুন। যেমন: 100"
@@ -2597,7 +2966,7 @@ async def text_handler(
         ):
 
             await update.message.reply_text(
-                "❌ আপনার Balance যথেষ্ট নয়।"
+                "❌ আপনার Balance যথেষ্ট নয়।"
             )
 
             return
@@ -2611,11 +2980,14 @@ async def text_handler(
         ] = "method"
 
         await update.message.reply_text(
+
             "📱 Payment Method লিখুন:\n\n"
+
             "bKash অথবা Nagad"
         )
 
         return
+
 
     # =====================================================
     # WITHDRAW METHOD
@@ -2659,6 +3031,7 @@ async def text_handler(
 
         return
 
+
     # =====================================================
     # WITHDRAW NUMBER
     # =====================================================
@@ -2687,7 +3060,7 @@ async def text_handler(
             context.user_data.clear()
 
             await update.message.reply_text(
-                "❌ Balance যথেষ্ট নয়। আবার চেষ্টা করুন।"
+                "❌ Balance যথেষ্ট নয়। আবার চেষ্টা করুন।"
             )
 
             return
@@ -2700,7 +3073,7 @@ async def text_handler(
             context.user_data.clear()
 
             await update.message.reply_text(
-                "❌ Withdrawal process করা যায়নি।"
+                "❌ Withdrawal process করা যায়নি।"
             )
 
             return
@@ -2710,7 +3083,12 @@ async def text_handler(
 
         cur.execute("""
             INSERT INTO withdrawals
-            (user_id, amount, method, number)
+            (
+                user_id,
+                amount,
+                method,
+                number
+            )
             VALUES (?, ?, ?, ?)
         """, (
             user.id,
@@ -2727,35 +3105,60 @@ async def text_handler(
         context.user_data.clear()
 
         await update.message.reply_text(
+
             "✅ <b>Withdrawal Request Submitted!</b>\n\n"
-            f"💰 Amount: {money(amount)}\n"
-            f"📱 Method: {method}\n"
-            f"☎️ Number: {safe(number)}\n\n"
+
+            f"💰 Amount: "
+            f"{money(amount)}\n"
+
+            f"📱 Method: "
+            f"{method}\n"
+
+            f"☎️ Number: "
+            f"{safe(number)}\n\n"
+
             "⏳ Admin verification-এর জন্য অপেক্ষা করুন।",
+
             parse_mode="HTML",
             reply_markup=user_menu()
         )
 
         await context.bot.send_message(
+
             ADMIN_ID,
+
             "💸 <b>NEW WITHDRAWAL</b>\n\n"
+
             f"🆔 Request: #{wid}\n"
-            f"👤 User: <code>{user.id}</code>\n"
-            f"💰 Amount: {money(amount)}\n"
-            f"📱 Method: {method}\n"
-            f"☎️ Number: <code>{safe(number)}</code>",
+
+            f"👤 User: "
+            f"<code>{user.id}</code>\n"
+
+            f"💰 Amount: "
+            f"{money(amount)}\n"
+
+            f"📱 Method: "
+            f"{method}\n"
+
+            f"☎️ Number: "
+            f"<code>{safe(number)}</code>",
+
             parse_mode="HTML",
+
             reply_markup=InlineKeyboardMarkup([
+
                 [
                     InlineKeyboardButton(
                         "💸 Withdrawal দেখুন",
                         callback_data="admin_withdrawals"
                     )
                 ]
+
             ])
         )
 
         return
+
 
     # =====================================================
     # TEXT PROOF
@@ -2777,7 +3180,11 @@ async def text_handler(
 
             cur.execute("""
                 INSERT INTO submissions
-                (user_id, task_id, proof)
+                (
+                    user_id,
+                    task_id,
+                    proof
+                )
                 VALUES (?, ?, ?)
             """, (
                 user.id,
@@ -2796,13 +3203,15 @@ async def text_handler(
             context.user_data.clear()
 
             await update.message.reply_text(
-                "⚠️ এই Task-এর Proof আগে জমা দিয়েছেন।"
+                "⚠️ এই Task-এর Proof আগে জমা দিয়েছেন।"
             )
 
             return
 
         cur.execute("""
-            SELECT title, reward
+            SELECT
+                title,
+                reward
             FROM tasks
             WHERE id=?
         """, (
@@ -2816,33 +3225,50 @@ async def text_handler(
         context.user_data.clear()
 
         await update.message.reply_text(
-            "✅ Proof জমা হয়েছে!\n\n"
+
+            "✅ Proof জমা হয়েছে!\n\n"
+
             "⏳ Admin verification-এর পর Reward যোগ হবে।",
+
             reply_markup=user_menu()
         )
 
         await context.bot.send_message(
+
             ADMIN_ID,
+
             "📝 <b>NEW TEXT PROOF</b>\n\n"
+
             f"🆔 Proof #{sid}\n"
-            f"👤 User: <code>{user.id}</code>\n"
+
+            f"👤 User: "
+            f"<code>{user.id}</code>\n"
+
             f"📋 Task: "
             f"{safe(task[0] if task else 'Unknown')}\n"
+
             f"💰 Reward: "
             f"{money(task[1] if task else 0)}\n\n"
-            f"📄 Proof:\n{safe(text)}",
+
+            f"📄 Proof:\n"
+            f"{safe(text)}",
+
             parse_mode="HTML",
+
             reply_markup=InlineKeyboardMarkup([
+
                 [
                     InlineKeyboardButton(
                         "📝 Proof দেখুন",
                         callback_data="admin_proofs"
                     )
                 ]
+
             ])
         )
 
         return
+
 
     # =====================================================
     # ADMIN
@@ -2854,9 +3280,10 @@ async def text_handler(
             "admin_step"
         )
 
-        # -------------------------------------------------
+
+        # =================================================
         # TITLE
-        # -------------------------------------------------
+        # =================================================
 
         if step == "title":
 
@@ -2874,9 +3301,10 @@ async def text_handler(
 
             return
 
-        # -------------------------------------------------
+
+        # =================================================
         # DESCRIPTION
-        # -------------------------------------------------
+        # =================================================
 
         if step == "description":
 
@@ -2894,9 +3322,10 @@ async def text_handler(
 
             return
 
-        # -------------------------------------------------
+
+        # =================================================
         # REWARD
-        # -------------------------------------------------
+        # =================================================
 
         if step == "reward":
 
@@ -2904,7 +3333,7 @@ async def text_handler(
 
                 reward = float(text)
 
-            except:
+            except Exception:
 
                 await update.message.reply_text(
                     "❌ সঠিক সংখ্যা লিখুন।"
@@ -2926,9 +3355,10 @@ async def text_handler(
 
             return
 
-        # -------------------------------------------------
+
+        # =================================================
         # LINK
-        # -------------------------------------------------
+        # =================================================
 
         if step == "link":
 
@@ -2941,21 +3371,28 @@ async def text_handler(
             ] = "limit"
 
             await update.message.reply_text(
+
                 "👥 <b>Task Limit</b>\n\n"
+
                 "এই Task সর্বোচ্চ কতজন User করতে পারবে?\n\n"
+
                 "উদাহরণ:\n"
                 "100\n"
                 "200\n"
                 "500\n\n"
-                "♾️ Unlimited চাইলে <b>0</b> লিখুন।",
+
+                "♾️ Unlimited চাইলে "
+                "<b>0</b> লিখুন।",
+
                 parse_mode="HTML"
             )
 
             return
 
-        # -------------------------------------------------
+
+        # =================================================
         # LIMIT
-        # -------------------------------------------------
+        # =================================================
 
         if step == "limit":
 
@@ -2963,7 +3400,7 @@ async def text_handler(
 
                 limit = int(text)
 
-            except:
+            except Exception:
 
                 await update.message.reply_text(
                     "❌ শুধু সংখ্যা লিখুন। যেমন: 100 অথবা 0"
@@ -3000,7 +3437,13 @@ async def text_handler(
 
             cur.execute("""
                 INSERT INTO tasks
-                (title, description, reward, link, max_users)
+                (
+                    title,
+                    description,
+                    reward,
+                    link,
+                    max_users
+                )
                 VALUES (?, ?, ?, ?, ?)
             """, (
                 title,
@@ -3024,20 +3467,30 @@ async def text_handler(
             )
 
             await update.message.reply_text(
+
                 "✅ <b>Task Created Successfully!</b>\n\n"
-                f"🆔 Task ID: {task_id}\n"
+
+                f"🆔 Task ID: "
+                f"{task_id}\n"
+
                 f"📋 {safe(title)}\n"
-                f"💰 Reward: {money(reward)}\n"
-                f"👥 Limit: {limit_text}",
+
+                f"💰 Reward: "
+                f"{money(reward)}\n"
+
+                f"👥 Limit: "
+                f"{limit_text}",
+
                 parse_mode="HTML",
                 reply_markup=admin_menu()
             )
 
             return
 
-        # -------------------------------------------------
+
+        # =================================================
         # BROADCAST
-        # -------------------------------------------------
+        # =================================================
 
         if step == "broadcast":
 
@@ -3068,31 +3521,36 @@ async def text_handler(
 
                     sent += 1
 
-                    # Telegram flood limit এড়াতে
                     await asyncio.sleep(
                         0.04
                     )
 
-                except:
+                except Exception:
 
                     failed += 1
 
             await update.message.reply_text(
+
                 "📢 <b>Broadcast Complete</b>\n\n"
+
                 f"✅ Sent: {sent}\n"
                 f"❌ Failed: {failed}",
+
                 parse_mode="HTML",
                 reply_markup=admin_menu()
             )
 
             return
 
+
     # =====================================================
     # DEFAULT
     # =====================================================
 
     await update.message.reply_text(
+
         "🏠 মেনু থেকে একটি অপশন নির্বাচন করুন।",
+
         reply_markup=(
             admin_menu()
             if user.id == ADMIN_ID
@@ -3110,7 +3568,8 @@ def run_web():
     web.run(
         host="0.0.0.0",
         port=PORT,
-        threaded=True
+        threaded=True,
+        use_reloader=False
     )
 
 
@@ -3123,24 +3582,24 @@ def main():
     if not BOT_TOKEN:
 
         raise RuntimeError(
-            "BOT_TOKEN সেট করা হয়নি।"
+            "BOT_TOKEN সেট করা হয়নি।"
         )
 
     if not ADMIN_ID:
 
         raise RuntimeError(
-            "ADMIN_ID সেট করা হয়নি।"
+            "ADMIN_ID সেট করা হয়নি।"
         )
 
     if not WEB_APP_URL:
 
         print(
-            "⚠️ WARNING: WEB_APP_URL সেট করা হয়নি।"
+            "⚠️ WARNING: WEB_APP_URL সেট করা হয়নি। "
+            "Ad button-এর জন্য আসল Render URL দিতে হবে।"
         )
 
     setup_database()
 
-    # Web Server আলাদা Thread-এ
     threading.Thread(
         target=run_web,
         daemon=True
